@@ -311,7 +311,7 @@ INDEX_HTML = """
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Shift Trading</title>
+  <title>JMH/HCH Shift Trading</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     /* ===== Design tokens: light (default) ===== */
@@ -472,7 +472,7 @@ INDEX_HTML = """
     <div class="wrap">
       <div class="brand">
         <div class="brand-badge"></div>
-        <h1>Shift Trading</h1>
+        <h1>JMH/HCH Shift Trading</h1>
       </div>
 
       <div class="controls">
@@ -495,7 +495,7 @@ INDEX_HTML = """
       </div>
 
       <div class="legend">
-        <span>Select your name and click on a shift you want to trade away</span>
+        <span> Select your name and click on a shift you want to trade away. </span>
         <span>Excluded: Trauma / Ultrasound / “US” / Sick Call</span>
         <span>Hopefully this is accurate but may contain errors</span>
       </div>
