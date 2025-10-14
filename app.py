@@ -495,9 +495,9 @@ INDEX_HTML = """
       </div>
 
       <div class="legend">
-        <span>Eligible titles only (flexible matching)</span>
+        <span>Select your name and click on a shift you want to trade away</span>
         <span>Excluded: Trauma / Ultrasound / “US” / Sick Call</span>
-        <span>Rest rule checked locally around the swap</span>
+        <span>Hopefully this is accurate but may contain errors</span>
       </div>
     </div>
   </header>
