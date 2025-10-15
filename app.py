@@ -13,14 +13,20 @@ with open("calendars.json") as f:
 
 EASTERN = pytz.timezone("America/New_York")
 
+# -------------------------------------------------
+# Small in-memory cache to speed repeated requests
+# -------------------------------------------------
+_CACHE = None
+_CACHE_TTL_SECONDS = 120  # adjust as desired
+
+
 # -------------------------------
-# Datetime helpers (with minute rounding)
+# Datetime helpers
 # -------------------------------
 def round_to_minute(dt: datetime) -> datetime:
     return dt.replace(second=0, microsecond=0)
 
 def to_eastern(dt):
-    """Return tz-aware datetime in Eastern. Date-only becomes midnight Eastern, then round to minute."""
     if isinstance(dt, date) and not isinstance(dt, datetime):
         naive_midnight = datetime.combine(dt, time(0, 0))
         localized = EASTERN.localize(naive_midnight)
@@ -35,13 +41,11 @@ def iso(dt):
     return dt.astimezone(EASTERN).isoformat()
 
 def future_cutoff():
-    """
-    Start-of-day (00:00) *tomorrow* in Eastern.
-    Only shifts that START on/after this will be loaded/considered.
-    """
+    """Start-of-day (00:00) *tomorrow* in Eastern; only shifts starting on/after will be loaded."""
     now_et = datetime.now(EASTERN)
     start_of_today = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
     return start_of_today + timedelta(days=1)
+
 
 # -------------------------------
 # Eligibility rules
@@ -77,15 +81,15 @@ def is_eligible_title(title: str) -> bool:
             return False
     return any(rx.search(title) for rx in ALLOW_REGEXES)
 
+
 # -------------------------------
-# Normalize all shifts (FILTERS TO FUTURE—starts on/after tomorrow 00:00 ET)
-# Robust to missing DTEND/DURATION and per-calendar failures.
+# Normalize all shifts (FUTURE ONLY: start >= tomorrow 00:00 ET)
 # -------------------------------
 def normalize_shifts(start_cutoff=None):
     """
     Returns:
       people: list[str]
-      flat: list[shift dict] (ONLY future shifts whose *start* >= tomorrow 00:00 ET)
+      flat: list[shift dict]  (future-only)
       schedules: dict[str, list[shift]]
     Shift dict:
       { id, person, title, start, end, eligible }
@@ -98,68 +102,33 @@ def normalize_shifts(start_cutoff=None):
 
     for cal in calendars:
         names.append(cal["name"])
-        try:
-            resp = requests.get(cal["url"], timeout=15)
-            resp.raise_for_status()
-        except Exception as e:
-            # Skip this calendar if fetch fails
-            app.logger.warning(f"Calendar fetch failed for {cal.get('name')}: {e}")
-            continue
-
-        try:
-            cal_obj = Calendar.from_ical(resp.text)
-        except Exception as e:
-            app.logger.warning(f"Calendar parse failed for {cal.get('name')}: {e}")
-            continue
+        resp = requests.get(cal["url"], timeout=12)
+        resp.raise_for_status()
+        cal_obj = Calendar.from_ical(resp.text)
 
         for comp in cal_obj.walk():
             if comp.name != "VEVENT":
                 continue
 
-            try:
-                dtstart_field = comp.get("dtstart")
-                if not dtstart_field:
-                    continue  # no start, skip
-                start = to_eastern(dtstart_field.dt)
-
-                # Try DTEND; if missing, use DURATION; fallback +1 hour
-                dtend_field = comp.get("dtend")
-                if dtend_field:
-                    end = to_eastern(dtend_field.dt)
-                else:
-                    duration_field = comp.get("duration")
-                    if duration_field:
-                        # iCalendar duration -> timedelta
-                        td = duration_field.dt if hasattr(duration_field, "dt") else duration_field
-                        if not isinstance(td, timedelta):
-                            # Defensive: if weird type, default
-                            td = timedelta(hours=1)
-                        end = to_eastern(start + td)
-                    else:
-                        end = to_eastern(start + timedelta(hours=1))
-
-                # Ensure non-empty interval
-                if end <= start:
-                    continue
-
-                # Only future shifts whose START >= cutoff
-                if start < start_cutoff:
-                    continue
-
-                title = str(comp.get("summary", "") or "")
-                shift = {
-                    "id": f'{cal["name"]}|{iso(start)}|{iso(end)}|{title}',
-                    "person": cal["name"],
-                    "title": title,
-                    "start": start,
-                    "end": end,
-                    "eligible": is_eligible_title(title),
-                }
-                flat.append(shift)
-            except Exception as e:
-                # Skip problematic event
-                app.logger.warning(f"Skipping event in {cal.get('name')} due to error: {e}")
+            start = to_eastern(comp.decoded("dtstart"))
+            end = to_eastern(comp.decoded("dtend"))  # exclusive by spec
+            if end <= start:
                 continue
+
+            # Only future shifts whose START >= cutoff
+            if start < start_cutoff:
+                continue
+
+            title = str(comp.get("summary", "") or "")
+            shift = {
+                "id": f'{cal["name"]}|{iso(start)}|{iso(end)}|{title}',
+                "person": cal["name"],
+                "title": title,
+                "start": start,
+                "end": end,
+                "eligible": is_eligible_title(title),
+            }
+            flat.append(shift)
 
     schedules = defaultdict(list)
     for s in flat:
@@ -169,6 +138,20 @@ def normalize_shifts(start_cutoff=None):
 
     people = sorted(set(names))
     return people, flat, schedules
+
+
+def load_data_cached():
+    """Return (people, flat, schedules), using a short-lived in-memory cache."""
+    global _CACHE
+    now = datetime.now(EASTERN)
+    if _CACHE is not None:
+        ts = _CACHE.get("ts")
+        if ts and (now - ts).total_seconds() < _CACHE_TTL_SECONDS:
+            return _CACHE["people"], _CACHE["flat"], _CACHE["schedules"]
+    people, flat, schedules = normalize_shifts()
+    _CACHE = {"ts": now, "people": people, "flat": flat, "schedules": schedules}
+    return people, flat, schedules
+
 
 # -------------------------------
 # Interval and rules
@@ -186,9 +169,9 @@ def is_free_for_interval(person_shifts, interval_start, interval_end, exclude_id
 
 def local_break_ok(sorted_shifts, idx):
     """
-    Localized rest rule around the affected shift only:
-      - gap(prev → cur) >= duration(prev)
-      - gap(cur  → next) >= duration(cur)
+    Localized rest rule around affected shift only:
+      - gap(prev→cur) >= duration(prev)
+      - gap(cur →next) >= duration(cur)
     """
     cur = sorted_shifts[idx]
     prev = sorted_shifts[idx - 1] if idx > 0 else None
@@ -208,85 +191,12 @@ def local_break_ok(sorted_shifts, idx):
 
     return True
 
-# -------------------------------
-# Swap helpers
-# -------------------------------
-def clone_for(new_person, s):
-    return {
-        **s,
-        "person": new_person,
-        "id": f'{new_person}|{iso(s["start"])}|{iso(s["end"])}|{s["title"]}',
-    }
-
-def swapped_schedules(schedules, trader_shift, tradee_shift):
-    """
-    Return (A_prime, B_prime, sB_for_A, sA_for_B) schedules after hypothetically swapping these two shifts.
-    """
-    A = trader_shift["person"]
-    B = tradee_shift["person"]
-    sA = trader_shift
-    sB = tradee_shift
-
-    A_sched = schedules[A]
-    B_sched = schedules[B]
-
-    sB_for_A = clone_for(A, sB)
-    sA_for_B = clone_for(B, sA)
-
-    A_prime = [x for x in A_sched if x["id"] != sA["id"]] + [sB_for_A]
-    B_prime = [x for x in B_sched if x["id"] != sB["id"]] + [sA_for_B]
-    A_prime.sort(key=lambda x: x["start"])
-    B_prime.sort(key=lambda x: x["start"])
-    return A_prime, B_prime, sB_for_A, sA_for_B
 
 # -------------------------------
-# 5+ off-day run detection (advisory)
-# -------------------------------
-def shift_start_dates_set(schedule_list):
-    """Return a set of date() (ET) when shifts start."""
-    return { s["start"].astimezone(EASTERN).date() for s in schedule_list }
-
-def is_in_five_day_offrun(schedule_list, date_to_check):
-    """
-    date_to_check: a datetime.date (Eastern) to evaluate.
-    We consider a day 'off' if the person has NO shift that STARTS on that date.
-    We check the maximal consecutive off-days run containing date_to_check.
-    """
-    start_dates = shift_start_dates_set(schedule_list)
-
-    # If they START a shift on this date, it's not an off day -> cannot be in an off-run.
-    if date_to_check in start_dates:
-        return False
-
-    # Count backward/forward consecutive off days.
-    run_len = 1
-    # backward
-    d = date_to_check
-    while True:
-        d = d - timedelta(days=1)
-        if d in start_dates:
-            break
-        run_len += 1
-        if run_len >= 12:  # guardrail
-            break
-
-    # forward
-    d = date_to_check
-    while True:
-        d = d + timedelta(days=1)
-        if d in start_dates:
-            break
-        run_len += 1
-        if run_len >= 24:  # guardrail
-            break
-
-    return run_len >= 5
-
-# -------------------------------
-# Trade simulation (uses localized break rule)
+# Trade simulation (+ 60h cap rule after swap)
 # -------------------------------
 def simulate_swap_ok(schedules, trader_shift, tradee_shift):
-    # Eligibility
+    # Titles must be eligible (allow-list) and not excluded
     if not (trader_shift["eligible"] and tradee_shift["eligible"]):
         return False, "ineligible-title"
 
@@ -301,16 +211,29 @@ def simulate_swap_ok(schedules, trader_shift, tradee_shift):
     A_sched = schedules[A]
     B_sched = schedules[B]
 
-    # Availability before swap (ignore the shift they're giving up)
+    # Availability (ignore the shift they are giving up)
     if not is_free_for_interval(B_sched, sA["start"], sA["end"], exclude_id=sB["id"]):
         return False, "B-not-free-for-A"
     if not is_free_for_interval(A_sched, sB["start"], sB["end"], exclude_id=sA["id"]):
         return False, "A-not-free-for-B"
 
-    # Simulate swap
-    A_prime, B_prime, sB_for_A, sA_for_B = swapped_schedules(schedules, sA, sB)
+    # Simulate swap (change owners)
+    def clone_for(new_person, s):
+        return {
+            **s,
+            "person": new_person,
+            "id": f'{new_person}|{iso(s["start"])}|{iso(s["end"])}|{s["title"]}',
+        }
 
-    # Localized break checks only around the inserted shifts
+    sB_for_A = clone_for(A, sB)
+    sA_for_B = clone_for(B, sA)
+
+    A_prime = [x for x in A_sched if x["id"] != sA["id"]] + [sB_for_A]
+    B_prime = [x for x in B_sched if x["id"] != sB["id"]] + [sA_for_B]
+    A_prime.sort(key=lambda x: x["start"])
+    B_prime.sort(key=lambda x: x["start"])
+
+    # Localized rest checks
     a_idx = A_prime.index(sB_for_A)
     b_idx = B_prime.index(sA_for_B)
 
@@ -319,38 +242,32 @@ def simulate_swap_ok(schedules, trader_shift, tradee_shift):
     if not local_break_ok(B_prime, b_idx):
         return False, "B-break-rule"
 
+    # Weekly cap (<= 60h) check for both around the new shift's week
+    def week_caps_ok(prime_sched, new_shift):
+        start = new_shift["start"]
+        weekday = start.weekday()  # Monday=0
+        week_start = (start - timedelta(days=weekday)).replace(hour=0, minute=0, second=0, microsecond=0)
+        week_end = week_start + timedelta(days=7)
+        total = 0.0
+        for s in prime_sched:
+            if week_start <= s["start"] < week_end:
+                total += (s["end"] - s["start"]).total_seconds() / 3600.0
+        return total <= 60.0
+
+    if not week_caps_ok(A_prime, sB_for_A):
+        return False, "A-weekly-cap"
+    if not week_caps_ok(B_prime, sA_for_B):
+        return False, "B-weekly-cap"
+
     return True, "ok"
 
-def advisory_offrun_flags_after_swap(schedules, trader_shift, tradee_shift):
-    """
-    Returns:
-      (tradee_receives_on_offrun, trader_receives_on_offrun)
-      Each True/False indicates whether the recipient receives their new shift
-      on a date that belongs to a >=5-day off run (post-trade schedule).
-    """
-    A_prime, B_prime, sB_for_A, sA_for_B = swapped_schedules(schedules, trader_shift, tradee_shift)
-
-    # Date to evaluate for each side is the START DATE (ET) of the received shift
-    date_for_A = sB_for_A["start"].astimezone(EASTERN).date()
-    date_for_B = sA_for_B["start"].astimezone(EASTERN).date()
-
-    trader_receives_on_offrun = is_in_five_day_offrun(A_prime, date_for_A)
-    tradee_receives_on_offrun = is_in_five_day_offrun(B_prime, date_for_B)
-
-    return tradee_receives_on_offrun, trader_receives_on_offrun
 
 # -------------------------------
 # API: shifts (future only)
 # -------------------------------
 @app.route("/shifts.json")
 def shifts_json():
-    try:
-        people, flat, _ = normalize_shifts()
-    except Exception as e:
-        app.logger.error(f"/shifts.json failed: {e}")
-        # Never 500 to the client; return empty set so UI can render a friendly state
-        return jsonify({"people": [], "shifts": []})
-
+    people, flat, _ = load_data_cached()
     out = []
     for s in flat:
         out.append({
@@ -363,8 +280,9 @@ def shifts_json():
         })
     return jsonify({"people": people, "shifts": out})
 
+
 # -------------------------------
-# API: trade options (future only) + advisory off-run flags
+# API: trade options (future only)
 # -------------------------------
 @app.route("/trade-options", methods=["POST"])
 def trade_options():
@@ -375,7 +293,7 @@ def trade_options():
     if not trader_person or not trader_shift_id:
         return jsonify({"error": "missing trader_person or trader_shift_id"}), 400
 
-    _, flat, schedules = normalize_shifts()
+    _, flat, schedules = load_data_cached()
 
     trader_shift = next((s for s in flat if s["id"] == trader_shift_id and s["person"] == trader_person), None)
     if not trader_shift:
@@ -387,7 +305,6 @@ def trade_options():
             continue
         ok, reason = simulate_swap_ok(schedules, trader_shift, sB)
         if ok:
-            offrun_tradee, offrun_trader = advisory_offrun_flags_after_swap(schedules, trader_shift, sB)
             candidates.append({
                 "tradee_person": sB["person"],
                 "tradee_shift": {
@@ -398,12 +315,7 @@ def trade_options():
                     "end": iso(sB["end"]),
                     "eligible": sB["eligible"],
                 },
-                "reason": reason,
-                "vacation_hint": bool(offrun_tradee or offrun_trader),
-                "vacation_detail": {
-                    "tradee_receives_on_offrun": bool(offrun_tradee),
-                    "trader_receives_on_offrun": bool(offrun_trader),
-                }
+                "reason": reason
             })
 
     candidates.sort(key=lambda c: (c["tradee_shift"]["start"], c["tradee_person"]))
@@ -420,6 +332,7 @@ def trade_options():
         "candidates": candidates
     })
 
+
 # -------------------------------
 # API: final recheck (future only)
 # -------------------------------
@@ -431,7 +344,7 @@ def trade_recheck():
     if not trader_shift_id or not tradee_shift_id:
         return jsonify({"error": "missing ids"}), 400
 
-    _, flat, schedules = normalize_shifts()
+    _, flat, schedules = load_data_cached()
     sA = next((s for s in flat if s["id"] == trader_shift_id), None)
     sB = next((s for s in flat if s["id"] == tradee_shift_id), None)
     if not sA or not sB:
@@ -440,8 +353,10 @@ def trade_recheck():
     ok, reason = simulate_swap_ok(schedules, sA, sB)
     return jsonify({"ok": ok, "reason": reason})
 
+
 # -------------------------------
-# UI (Apple-inspired, theme toggle, loader, weekend badge, orange "?" off-run hint)
+# UI (Apple-inspired, day-night SVG toggle, weekend badge,
+# hamster loader, Option A two-column comparison in modal)
 # -------------------------------
 INDEX_HTML = """
 <!doctype html>
@@ -465,7 +380,7 @@ INDEX_HTML = """
       --radius: 14px;
       --success: #34c759;
       --danger: #ff3b30;
-      --orange: #ff9f0a;
+      --amber: #ff9f0a;
     }
     body.theme-dark{
       --bg: #000000;
@@ -479,7 +394,7 @@ INDEX_HTML = """
       --shadow: 0 8px 30px rgba(0,0,0,.45);
       --success: #30d158;
       --danger: #ff453a;
-      --orange: #ff9f0a;
+      --amber: #ffd60a;
     }
 
     html,body{height:100%}
@@ -508,16 +423,14 @@ INDEX_HTML = """
     .controls{
       display:grid; grid-template-columns:1fr 1.6fr auto auto; gap:12px; margin-top:12px; align-items:end;
     }
-    @media (max-width: 900px){ .controls{grid-template-columns:1fr 1fr auto auto} }
-
+    @media (max-width: 900px){
+      .controls{grid-template-columns:1fr 1fr auto auto}
+    }
     label{display:block; margin:0 0 6px 2px; font-size:12px; color:var(--muted); font-weight:600; letter-spacing:.02em;}
     select{
-      width:100%; appearance:none;
-      padding:10px 12px; border-radius:12px;
-      color:var(--fg); background:var(--card);
-      border:1px solid var(--sep); outline:none;
-      box-shadow: var(--shadow);
-      transition:border-color .2s, box-shadow .2s;
+      width:100%; appearance:none; padding:10px 12px; border-radius:12px;
+      color:var(--fg); background:var(--card); border:1px solid var(--sep); outline:none;
+      box-shadow: var(--shadow); transition:border-color .2s, box-shadow .2s;
       background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 20 20" fill="%236e6e73"><path d="M5.5 7.5l4.5 4.5 4.5-4.5"/></svg>');
       background-repeat:no-repeat; background-position:right 10px center; background-size:14px;
     }
@@ -525,34 +438,36 @@ INDEX_HTML = """
     .btn{
       padding:10px 14px; border-radius:12px; border:1px solid var(--sep);
       background:var(--card); color:var(--fg); font-weight:600; cursor:pointer;
-      box-shadow: var(--shadow);
-      transition: transform .06s ease, background .2s;
+      box-shadow: var(--shadow); transition: transform .06s ease, background .2s;
     }
     .btn:hover{background:color-mix(in oklab, var(--card) 85%, var(--fg) 15%)}
     .btn:active{transform: translateY(1px)}
 
-    /* Theme segmented control (SVG day/night switch) */
-    .seg{ display:inline-flex; border:1px solid var(--sep); border-radius:12px; overflow:hidden; background:var(--bg); align-self:end; padding:4px 8px }
-    #theme-toggle-button{font-size: 17px; position:relative; display:inline-flex; align-items:center; width:7em; cursor:pointer}
-    #toggle{opacity:0; width:0; height:0}
+    /* Day/Night fancy toggle */
+    #theme-toggle-button{font-size:16px; position:relative; display:inline-flex; align-items:center; width:7em; cursor:pointer; user-select:none}
+    #toggle{opacity:0; width:0; height:0; position:absolute}
+    #theme-toggle-button svg{width:7em; height:2.6em; display:block}
     #container, #patches, #stars, #button, #sun, #moon, #cloud{
       transition-property: all;
       transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
       transition-duration: 0.25s;
     }
-    #toggle:checked + svg #container { fill:#2b4360; }
+    #toggle:checked + svg #container { fill: #2b4360; }
     #toggle:checked + svg #button { transform: translate(28px, 2.333px); }
-    #sun { opacity:1; }  #toggle:checked + svg #sun { opacity:0; }
-    #moon{ opacity:0; }  #toggle:checked + svg #moon{ opacity:1; }
-    #cloud{ opacity:1; } #toggle:checked + svg #cloud{ opacity:0; }
-    #stars{ opacity:0; } #toggle:checked + svg #stars{ opacity:1; }
+    #sun { opacity: 1; }
+    #toggle:checked + svg #sun { opacity: 0; }
+    #moon { opacity: 0; }
+    #toggle:checked + svg #moon { opacity: 1; }
+    #cloud { opacity: 1; }
+    #toggle:checked + svg #cloud { opacity: 0; }
+    #stars { opacity: 0; }
+    #toggle:checked + svg #stars { opacity: 1; }
 
     main .wrap{display:grid; grid-template-columns:1.2fr 1.8fr; gap:16px; margin-top:18px}
     @media (max-width: 900px){ main .wrap{grid-template-columns:1fr} }
 
     .panel{background:var(--card); border:1px solid var(--sep); border-radius:var(--radius); box-shadow: var(--shadow); padding:16px 14px}
     .section-title{margin:0 0 10px 4px; font-size:15px; font-weight:700; letter-spacing:.2px}
-
     .legend{display:flex; gap:14px; align-items:center; margin-top:8px; color:var(--muted); font-size:12px; border-top:1px solid var(--sep); padding-top:10px}
     .legend span{white-space:nowrap}
 
@@ -576,27 +491,51 @@ INDEX_HTML = """
     .offer{padding:9px 12px; border-radius:12px; border:1px solid transparent; background:var(--accent); color:#fff; font-weight:700; cursor:pointer; box-shadow:0 6px 20px rgba(10,132,255,.35); transition: transform .06s ease, background .15s ease}
     .offer:hover{background:var(--accent-pressed)}
     .offer:active{transform: translateY(1px)}
-
-    /* Orange “?” info badge */
-    .info-badge{
-      display:inline-flex; align-items:center; justify-content:center;
-      width:22px; height:22px; border-radius:50%;
-      background:var(--orange); color:#fff; font-weight:900; font-size:13px;
-      border:none; margin-left:8px; cursor:pointer;
-    }
-    .info-badge:focus{outline:2px solid var(--ring); outline-offset:2px}
-
     .empty, .muted{color:var(--muted); font-size:13px; padding:10px 4px}
 
-    /* Modal (Offer) */
+    /* Modal & OPTION A: Two-column comparison panels */
     .modal-backdrop{position:fixed; inset:0; background:rgba(0,0,0,.22); display:none; align-items:center; justify-content:center; z-index:30}
-    .modal{width:min(560px,94vw); border-radius:20px; border:1px solid var(--sep); background:var(--card); box-shadow:0 30px 80px rgba(0,0,0,.25); padding:20px 18px; animation: pop .18s ease}
+    .modal{
+      width:min(900px,94vw); border-radius:20px; border:1px solid var(--sep); background:var(--card);
+      box-shadow: 0 30px 80px rgba(0,0,0,.25);
+      padding:20px 18px;
+      animation: pop .18s ease;
+    }
     @keyframes pop{from{transform:scale(.98); opacity:0} to{transform:scale(1); opacity:1}}
-    .modal h3{margin:0 0 12px; font-size:17px}
-    .modal p{margin:6px 0; color:var(--fg); font-size:14px; line-height:1.38}
     .close{float:right; cursor:pointer; color:var(--muted); font-weight:700}
     .close:hover{color:var(--fg)}
+    .modal h3{margin:0 0 12px; font-size:17px}
 
+    .compare-wrap{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:12px}
+    @media (max-width: 720px){ .compare-wrap{grid-template-columns:1fr} }
+    .compare-card{
+      border:1px solid var(--sep); border-radius:16px; background:var(--card);
+      padding:12px 12px 10px;
+    }
+    .cc-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:8px}
+    .cc-name{font-weight:800}
+    .cc-badge{
+      padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700;
+      border:1px solid var(--sep); background:var(--bg); color:var(--muted);
+    }
+    .cc-badge.good{border-color:rgba(52,199,89,.35); color:var(--success)}
+    .cc-badge.warn{border-color:rgba(255,159,10,.45); color:var(--amber)}
+    .big-num{font-size:24px; font-weight:900; letter-spacing:.2px}
+    .cc-meta{
+      display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin-top:8px;
+    }
+    .cc-cell{border:1px solid var(--sep); border-radius:12px; padding:10px; text-align:center}
+    .cc-cell .lab{font-size:11px; color:var(--muted); margin-bottom:4px}
+    .pill-row{display:flex; gap:6px; align-items:center; margin-top:10px; flex-wrap:wrap}
+    .pill{border:1px solid var(--sep); border-radius:999px; padding:6px 10px; font-size:12px; background:var(--bg); white-space:nowrap; max-width:100%; overflow:hidden; text-overflow:ellipsis}
+    .pill.new{background:var(--accent); color:#fff; border-color:transparent}
+    .cc-table{
+      width:100%; border-collapse:collapse; margin-top:8px; font-size:12.5px
+    }
+    .cc-table th, .cc-table td{border-top:1px solid var(--sep); padding:6px 4px; text-align:left}
+    .cc-note{color:var(--muted); font-size:12px; margin-top:6px}
+
+    .msgarea{margin-top:12px}
     .seg-small{display:inline-flex; border:1px solid var(--sep); border-radius:12px; overflow:hidden; background:var(--bg)}
     .seg-small button{appearance:none; border:0; padding:8px 12px; background:transparent; color:var(--fg); font-weight:600; cursor:pointer}
     .seg-small button[aria-pressed="true"]{background:var(--accent); color:#fff}
@@ -604,20 +543,23 @@ INDEX_HTML = """
     .copybtn{padding:8px 12px; border-radius:12px; border:1px solid var(--sep); background:var(--card); color:var(--fg); font-weight:700; cursor:pointer}
     .copybtn.copied{border-color: var(--success); color: var(--success)}
 
-    /* Loader overlay + hamster animation (initial + during offer recheck) */
-    .loader{position:fixed; inset:0; z-index:40; display:flex; align-items:center; justify-content:center; background:color-mix(in oklab, var(--bg) 70%, transparent); backdrop-filter: blur(22px) saturate(1.4)}
+    /* Loader with hamster */
+    .loader{
+      position:fixed; inset:0; z-index:40; display:flex; align-items:center; justify-content:center;
+      background:color-mix(in oklab, var(--bg) 70%, transparent); backdrop-filter: blur(22px) saturate(1.4)
+    }
     .loader-card{width:min(520px,90vw); padding:18px; border-radius:20px; background:var(--card); border:1px solid var(--sep); box-shadow: var(--shadow)}
     .loader-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:10px}
     .loader-title{font-weight:700}
     .loader-sub{color:var(--muted); font-size:12.5px; margin-top:8px}
-    .loader-bar{height:10px; border-radius:999px; background:color-mix(in oklab, var(--bg) 60%, transparent); border:1px solid var(--sep); overflow:hidden}
+    .loader-bar{height:10px; border-radius:999px; background:color-mix(in oklab, var(--bg) 60%, transparent); border:1px solid var(--sep); overflow:hidden; margin-top:10px}
     .loader-fill{height:100%; width:0%; background:linear-gradient(90deg, #0a84ff, #64d2ff); transition:width .2s ease}
     .loader-error .loader-fill{background:linear-gradient(90deg, #ff3b30, #ff6961)}
     .fade-out{animation:fadeOut .28s ease forwards}
     @keyframes fadeOut{to{opacity:0; visibility:hidden}}
 
-    /* Hamster spinner (Uiverse by Nawsome) — FIXED keyframes */
-    .wheel-and-hamster { --dur: 1s; position: relative; width: 12em; height: 12em; font-size: 14px; margin: 10px auto 0; }
+    /* Hamster animation (Uiverse by Nawsome) */
+    .wheel-and-hamster{ --dur: 1s; position: relative; width: 12em; height: 12em; font-size: 14px; margin: 6px auto 0; }
     .wheel, .hamster, .hamster div, .spoke { position: absolute; }
     .wheel, .spoke { border-radius: 50%; top: 0; left: 0; width: 100%; height: 100%; }
     .wheel { background: radial-gradient(100% 100% at center,hsla(0,0%,60%,0) 47.8%,hsl(0,0%,60%) 48%); z-index: 2; }
@@ -630,56 +572,22 @@ INDEX_HTML = """
     .hamster__limb--fr, .hamster__limb--fl { clip-path: polygon(0 0,100% 0,70% 80%,60% 100%,0% 100%,40% 80%); top: 2em; left: 0.5em; width: 1em; height: 1.5em; transform-origin: 50% 0; }
     .hamster__limb--fr { animation: hamsterFRLimb var(--dur) linear infinite; background: linear-gradient(hsl(30,90%,80%) 80%,hsl(0,90%,75%) 80%); transform: rotate(15deg) translateZ(-1px); }
     .hamster__limb--fl { animation: hamsterFLLimb var(--dur) linear infinite; background: linear-gradient(hsl(30,90%,90%) 80%,hsl(0,90%,85%) 80%); transform: rotate(15deg); }
-    .hamster__limb--br, .hamster__limb--bl { border-radius: 0.75em 0.75em 0 0; clip-path: polygon(0 0,100% 0,100% 30%,70% 90%,70% 100%,30% 100%,40% 90%,0% 30%); top: 1em; left: 2.8em; width: 1.5em; height: 2.5em; transform-origin: 50% 30%; }
+    .hamster__limb--br, .hamster__limb--bl { border-radius: 0.75em 0.75em 0 0; clip-path: polygon(0 0,100% 0,100% 30%,70% 90%,70% 100%,30% 100%,40% 90%,0 30%); top: 1em; left: 2.8em; width: 1.5em; height: 2.5em; transform-origin: 50% 30%; }
     .hamster__limb--br { animation: hamsterBRLimb var(--dur) linear infinite; background: linear-gradient(hsl(30,90%,80%) 90%,hsl(0,90%,75%) 90%); transform: rotate(-25deg) translateZ(-1px); }
     .hamster__limb--bl { animation: hamsterBLLimb var(--dur) linear infinite; background: linear-gradient(hsl(30,90%,90%) 90%,hsl(0,90%,85%) 90%); transform: rotate(-25deg); }
     .hamster__tail { animation: hamsterTail var(--dur) linear infinite; background: hsl(0,90%,85%); border-radius: 0.25em 50% 50% 0.25em; box-shadow: 0 -0.2em 0 hsl(0,90%,75%) inset; top: 1.5em; right: -0.5em; width: 1em; height: 0.5em; transform: rotate(30deg) translateZ(-1px); transform-origin: 0.25em 0.25em; }
     .spoke { animation: spoke var(--dur) linear infinite; background: radial-gradient(100% 100% at center,hsl(0,0%,60%) 4.8%,hsla(0,0%,60%,0) 5%), linear-gradient(hsla(0,0%,55%,0) 46.9%,hsl(0,0%,65%) 47% 52.9%,hsla(0,0%,65%,0) 53%) 50% 50% / 99% 99% no-repeat; }
-
-    @keyframes hamster {
-      from, to { transform: rotate(4deg) translate(-0.8em,1.85em); }
-      50%      { transform: rotate(0) translate(-0.8em,1.85em); }
-    }
-    @keyframes hamsterHead {
-      from, 25%, 50%, 75%, to { transform: rotate(0); }
-      12.5%, 37.5%, 62.5%, 87.5% { transform: rotate(8deg); }
-    }
-    @keyframes hamsterEye {
-      from, 90%, to { transform: scaleY(1); }
-      95%           { transform: scaleY(0); }
-    }
-    @keyframes hamsterEar {
-      from, 25%, 50%, 75%, to { transform: rotate(0); }
-      12.5%, 37.5%, 62.5%, 87.5% { transform: rotate(12deg); }
-    }
-    @keyframes hamsterBody {
-      from, 25%, 50%, 75%, to { transform: rotate(0); }
-      12.5%, 37.5%, 62.5%, 87.5% { transform: rotate(-2deg); }
-    }
-    @keyframes hamsterFRLimb {
-      from, 25%, 50%, 75%, to { transform: rotate(50deg) translateZ(-1px); }
-      12.5%, 37.5%, 62.5%, 87.5% { transform: rotate(-30deg) translateZ(-1px); }
-    }
-    @keyframes hamsterFLLimb {
-      from, 25%, 50%, 75%, to { transform: rotate(-30deg); }
-      12.5%, 37.5%, 62.5%, 87.5% { transform: rotate(50deg); }
-    }
-    @keyframes hamsterBRLimb {
-      from, 25%, 50%, 75%, to { transform: rotate(-60deg) translateZ(-1px); }
-      12.5%, 37.5%, 62.5%, 87.5% { transform: rotate(20deg) translateZ(-1px); }
-    }
-    @keyframes hamsterBLLimb {
-      from, 25%, 50%, 75%, to { transform: rotate(20deg); }
-      12.5%, 37.5%, 62.5%, 87.5% { transform: rotate(-60deg); }
-    }
-    @keyframes hamsterTail {
-      from, 25%, 50%, 75%, to { transform: rotate(30deg) translateZ(-1px); }
-      12.5%, 37.5%, 62.5%, 87.5% { transform: rotate(10deg) translateZ(-1px); }
-    }
-    @keyframes spoke {
-      from { transform: rotate(0); }
-      to   { transform: rotate(-1turn); }
-    }
+    @keyframes hamster{ from, to{ transform: rotate(4deg) translate(-0.8em,1.85em); } 50%{ transform: rotate(0) translate(-0.8em,1.85em); } }
+    @keyframes hamsterHead{ from, 25%, 50%, 75%, to{ transform: rotate(0); } 12.5%, 37.5%, 62.5%, 87.5%{ transform: rotate(8deg); } }
+    @keyframes hamsterEye{ from, 90%, to{ transform: scaleY(1); } 95%{ transform: scaleY(0); } }
+    @keyframes hamsterEar{ from, 25%, 50%, 75%, to{ transform: rotate(0); } 12.5%, 37.5%, 62.5%, 87.5%{ transform: rotate(12deg); } }
+    @keyframes hamsterBody{ from, 25%, 50%, 75%, to{ transform: rotate(0); } 12.5%, 37.5%, 62.5%, 87.5%{ transform: rotate(-2deg); } }
+    @keyframes hamsterFRLimb{ from, 25%, 50%, 75%, to{ transform: rotate(50deg) translateZ(-1px); } 12.5%, 37.5%, 62.5%, 87.5%{ transform: rotate(-30deg) translateZ(-1px); } }
+    @keyframes hamsterFLLimb{ from, 25%, 50%, 75%, to{ transform: rotate(-30deg); } 12.5%, 37.5%, 62.5%, 87.5%{ transform: rotate(50deg); } }
+    @keyframes hamsterBRLimb{ from, 25%, 50%, 75%, to{ transform: rotate(-60deg) translateZ(-1px); } 12.5%, 37.5%, 62.5%, 87.5%{ transform: rotate(20deg) translateZ(-1px); } }
+    @keyframes hamsterBLLimb{ from, 25%, 50%, 75%, to{ transform: rotate(20deg); } 12.5%, 37.5%, 62.5%, 87.5%{ transform: rotate(-60deg); } }
+    @keyframes hamsterTail{ from, 25%, 50%, 75%, to{ transform: rotate(30deg) translateZ(-1px); } 12.5%, 37.5%, 62.5%, 87.5%{ transform: rotate(10deg) translateZ(-1px); } }
+    @keyframes spoke{ from{ transform: rotate(0); } to{ transform: rotate(-1turn); } }
   </style>
 </head>
 
@@ -694,11 +602,9 @@ INDEX_HTML = """
         </div>
         <div id="loaderPct" class="loader-title">0%</div>
       </div>
-      <div class="loader-bar"><div id="loaderFill" class="loader-fill"></div></div>
-      <div class="loader-sub" id="loaderSub">Fetching calendars and building options…</div>
 
-      <!-- cute spinner -->
-      <div class="wheel-and-hamster" aria-hidden="true">
+      <!-- Hamster animation -->
+      <div class="wheel-and-hamster">
         <div class="wheel"></div>
         <div class="hamster">
           <div class="hamster__body">
@@ -716,6 +622,9 @@ INDEX_HTML = """
         </div>
         <div class="spoke"></div>
       </div>
+
+      <div class="loader-sub" id="loaderSub">Fetching calendars and building options…</div>
+      <div class="loader-bar"><div id="loaderFill" class="loader-fill"></div></div>
     </div>
   </div>
 
@@ -739,37 +648,35 @@ INDEX_HTML = """
           <button id="refresh" class="btn" aria-label="Refresh schedules">Refresh</button>
         </div>
 
-        <!-- Theme switch (SVG) -->
-        <div class="seg">
-          <label id="theme-toggle-button">
-            <input id="toggle" type="checkbox" aria-label="Toggle theme">
-            <!-- SVG adapted to container -->
-            <svg viewBox="0 0 80 32" width="112" height="32" aria-hidden="true">
-              <rect id="container" x="0" y="0" width="80" height="32" rx="16" fill="#e6f0ff"/>
-              <g id="patches">
-                <circle id="sun" cx="20" cy="16" r="6" fill="#FFD60A"/>
-                <circle id="moon" cx="60" cy="16" r="6" fill="#F2F2F7"/>
+        <!-- Day/Night switch -->
+        <label id="theme-toggle-button" title="Toggle theme">
+          <input id="toggle" type="checkbox" aria-label="Theme toggle"/>
+          <svg viewBox="0 0 60 24">
+            <defs>
+              <clipPath id="buttonClip"><rect x="2" y="2" width="56" height="20" rx="10"/></clipPath>
+            </defs>
+            <rect id="container" x="0" y="0" width="60" height="24" rx="12" fill="#e9eef7"/>
+            <g id="patches" clip-path="url(#buttonClip)">
+              <circle id="cloud" cx="40" cy="8" r="4" fill="#cfe2ff"/>
+              <g id="stars" fill="#ffd27d">
+                <circle cx="20" cy="7" r="1"/>
+                <circle cx="25" cy="11" r="0.8"/>
+                <circle cx="15" cy="13" r="0.6"/>
               </g>
-              <g id="cloud">
-                <ellipse cx="28" cy="12" rx="4" ry="2" fill="#fff"/>
-                <ellipse cx="32" cy="12" rx="4" ry="2" fill="#fff"/>
-                <ellipse cx="30" cy="11" rx="5" ry="3" fill="#fff"/>
-              </g>
-              <g id="stars" fill="#fff">
-                <circle cx="52" cy="10" r="1"/>
-                <circle cx="58" cy="8"  r="1"/>
-                <circle cx="66" cy="12" r="1"/>
-              </g>
-              <rect id="button" x="2" y="2" width="28" height="28" rx="14" fill="#fff"/>
-            </svg>
-          </label>
-        </div>
+            </g>
+            <g id="button">
+              <circle cx="12" cy="12" r="10" fill="#fff"/>
+              <circle id="sun" cx="12" cy="12" r="6" fill="#ffd054"/>
+              <circle id="moon" cx="12" cy="12" r="5" fill="#dfe7ff"/>
+            </g>
+          </svg>
+        </label>
       </div>
 
       <div class="legend">
         <span>Select your name and click a shift you want to trade away.</span>
         <span>Excluded: Trauma / Ultrasound / “US” / Sick Call</span>
-        <span>Hopefully this is accurate but may contain errors</span>
+        <span>Future shifts only</span>
       </div>
     </div>
   </header>
@@ -788,42 +695,37 @@ INDEX_HTML = """
     </div>
   </main>
 
-  <!-- Offer modal -->
+  <!-- Offer Modal -->
   <div class="modal-backdrop" id="mb" aria-modal="true" role="dialog">
     <div class="modal">
       <span class="close" id="closex" aria-label="Close">✕</span>
       <h3>Propose Trade</h3>
-      <p id="modaldesc" class="muted" style="margin-top:-4px"></p>
-      <div style="display:flex; align-items:center; justify-content:space-between; margin:10px 0 8px;">
-        <div class="seg-small" role="tablist" aria-label="Message tone">
-          <button id="tonePro" role="tab" aria-pressed="true">Professional</button>
-          <button id="toneDes" role="tab" aria-pressed="false">Desperate</button>
-          <button id="toneSil" role="tab" aria-pressed="false">Silly</button>
-        </div>
-        <button id="copyBtn" class="copybtn" aria-label="Copy message">Copy</button>
-      </div>
-      <textarea id="msgbox" class="msgbox" readonly></textarea>
-      <p class="muted" style="color:var(--muted)">Copy and paste this into your preferred channel to complete the trade privately.</p>
-    </div>
-  </div>
 
-  <!-- Orange “?” info modal -->
-  <div class="modal-backdrop" id="infoBackdrop" aria-modal="true" role="dialog">
-    <div class="modal" id="infoModal">
-      <span class="close" id="infoClose" aria-label="Close">✕</span>
-      <h3>About this “?”</h3>
-      <p id="infoText">
-        This orange question mark indicates that the received shift would fall on a stretch of at least
-        five consecutive off days (no shifts starting that day) for the recipient, based on the hypothetical
-        post-trade schedules in Eastern time.
-      </p>
+      <!-- OPTION A: Two-column comparison panels -->
+      <div class="compare-wrap" id="compareWrap">
+        <!-- populated dynamically -->
+      </div>
+      <div class="cc-note">Week = Mon–Sun by shift start • Rest rule: gap ≥ prior shift duration • 60h max per week</div>
+
+      <!-- Message composer -->
+      <div class="msgarea">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin:8px 0 8px;">
+          <div class="seg-small" role="tablist" aria-label="Message tone">
+            <button id="tonePro" role="tab" aria-pressed="true">Professional</button>
+            <button id="toneDes" role="tab" aria-pressed="false">Desperate</button>
+            <button id="toneSil" role="tab" aria-pressed="false">Silly</button>
+          </div>
+          <button id="copyBtn" class="copybtn" aria-label="Copy message">Copy</button>
+        </div>
+        <textarea id="msgbox" class="msgbox" readonly></textarea>
+      </div>
     </div>
   </div>
 
   <script>
     const $ = (sel) => document.querySelector(sel);
 
-    // Fail-safe: surface JS errors on the loader so it never "silently" hangs
+    // Surface JS errors on the loader so it never silently hangs
     window.addEventListener('error', (e)=>{
       const loader = document.getElementById('loader');
       const loaderSub = document.getElementById('loaderSub');
@@ -835,7 +737,7 @@ INDEX_HTML = """
       }
     });
 
-    /* Loader */
+    /* Loader logic (progressive to 90%, then finish to 100% on ready) */
     const loader = $("#loader");
     const loaderFill = $("#loaderFill");
     const loaderPct = $("#loaderPct");
@@ -872,22 +774,25 @@ INDEX_HTML = """
       setLoader(100);
     }
 
-    /* Theme: default day, remember choice */
-    const themeToggle = $("#toggle");
-    function applyThemeFromToggle(){
-      const isNight = themeToggle.checked;
+    /* Theme */
+    const themeCheckbox = $("#toggle");
+    function applyTheme(theme){
+      const isNight = theme === "night";
       document.body.classList.toggle("theme-dark", isNight);
       document.body.classList.toggle("theme-light", !isNight);
-      try { localStorage.setItem("shift-theme", isNight ? "night" : "day"); } catch(e){}
+      if (themeCheckbox) themeCheckbox.checked = isNight;
+      try { localStorage.setItem("shift-theme", theme); } catch(e){}
     }
     function initTheme(){
       let saved = null;
       try { saved = localStorage.getItem("shift-theme"); } catch(e){}
-      const useNight = (saved === "night");
-      themeToggle.checked = useNight;
-      applyThemeFromToggle();
+      applyTheme(saved === "night" ? "night" : "day");
     }
-    themeToggle.addEventListener("change", applyThemeFromToggle);
+    if (themeCheckbox){
+      themeCheckbox.addEventListener("change", ()=>{
+        applyTheme(themeCheckbox.checked ? "night" : "day");
+      });
+    }
 
     /* App els */
     const meSel = $("#me");
@@ -896,17 +801,12 @@ INDEX_HTML = """
     const results = $("#results");
     const modal = $("#mb");
     const closex = $("#closex");
-    const modaldesc = $("#modaldesc");
+    const compareWrap = $("#compareWrap");
     const msgbox = $("#msgbox");
     const copyBtn = $("#copyBtn");
     const tonePro = $("#tonePro");
     const toneDes = $("#toneDes");
     const toneSil = $("#toneSil");
-
-    // Info modal elements
-    const infoBackdrop = $("#infoBackdrop");
-    const infoClose = $("#infoClose");
-    const infoText = $("#infoText");
 
     let SHIFTS = [];
     let PEOPLE = [];
@@ -958,10 +858,9 @@ INDEX_HTML = """
         loaderSub.textContent = "Parsing data…";
         const data = await r.json();
         setLoader(72);
-
         loaderSub.textContent = "Preparing interface…";
         PEOPLE = data.people;
-        SHIFTS = data.shifts; // server already filters to future
+        SHIFTS = data.shifts; // already filtered to future by server
         setLoader(86);
 
         populatePeople();
@@ -1014,21 +913,25 @@ INDEX_HTML = """
         const meta = document.createElement("div");
         meta.className = "meta";
         const title = document.createElement("div");
-        title.className = "title"; title.textContent = s.title;
+        title.className = "title";
+        title.textContent = s.title;
         const subRow = document.createElement("div");
-        subRow.className = "sub"; subRow.textContent = `${f1.dstr} ${f1.t} · ${f2.t} • ${dur}h`;
+        subRow.className = "sub";
+        subRow.textContent = `${f1.dstr} ${f1.t} · ${f2.t} • ${dur}h`;
         const wk = weekendBadgeEl(s.start);
         if (wk){ subRow.appendChild(document.createTextNode(" ")); subRow.appendChild(wk); }
         meta.appendChild(title); meta.appendChild(subRow);
 
         const chip = document.createElement("div");
-        chip.className = "chip"; chip.textContent = s.eligible ? "Eligible" : "Not eligible";
+        chip.className = "chip";
+        chip.textContent = s.eligible ? "Eligible" : "Not eligible";
 
         card.appendChild(meta); card.appendChild(chip);
 
         const choose = ()=> selectMyShift(s.id);
         card.addEventListener("click", choose);
         card.addEventListener("keydown", (e)=>{ if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(); } });
+
         mineList.appendChild(card);
       });
 
@@ -1037,7 +940,7 @@ INDEX_HTML = """
       if (current) selectMyShift(current);
     }
 
-    // Outreach message builder
+    // Build outreach message text
     function buildMessage(tone, me, partner, myShift, theirShift){
       const myF1 = fmt(myShift.start), myF2 = fmt(myShift.end);
       const thF1 = fmt(theirShift.start), thF2 = fmt(theirShift.end);
@@ -1077,7 +980,7 @@ I give you:
 you present to me your:
 • ${getLine}
 
-computers say it’s legit (i'm p sure) ✅
+computers say it’s legit (i'm p sure)✅
 lmk and I’ll make it official 😎
 — ${me}`;
 
@@ -1089,9 +992,8 @@ lmk and I’ll make it official 😎
     function setTone(active){
       [tonePro, toneDes, toneSil].forEach(btn => btn.setAttribute("aria-pressed", "false"));
       if (active === "professional") tonePro.setAttribute("aria-pressed","true");
-      if (active === "desperate")    toneDes.setAttribute("aria-pressed","true");
-      if (active === "silly")        toneSil.setAttribute("aria-pressed","true");
-
+      if (active === "desperate") toneDes.setAttribute("aria-pressed","true");
+      if (active === "silly") toneSil.setAttribute("aria-pressed","true");
       if (CURRENT_TRADE){
         const { me, partner, myShift, theirShift } = CURRENT_TRADE;
         msgbox.value = buildMessage(
@@ -1104,6 +1006,119 @@ lmk and I’ll make it official 😎
     function setCopyState(ok){
       copyBtn.classList.toggle("copied", !!ok);
       copyBtn.textContent = ok ? "Copied ✓" : "Copy";
+    }
+
+    // Helpers for comparison data
+    function weekStart(d){ // Monday 00:00
+      const wd = d.getDay(); // 0=Sun
+      const offset = (wd === 0 ? -6 : 1 - wd);
+      const start = new Date(d);
+      start.setHours(0,0,0,0);
+      start.setDate(start.getDate() + offset);
+      return start;
+    }
+    function weekEnd(d){ const ws = weekStart(d); const we = new Date(ws); we.setDate(ws.getDate() + 7); return we; }
+    function cloneScheduleFor(person){ return SHIFTS.filter(s => s.person === person).map(s => ({...s})); }
+    function insertSwapAndSort(schedule, removeId, addShiftForPerson){
+      const kept = schedule.filter(s => s.id !== removeId);
+      kept.push(addShiftForPerson);
+      kept.sort((a,b)=> a.start.localeCompare(b.start));
+      return kept;
+    }
+    function findPrevNext(sortedSchedule, anchorShiftId){
+      const idx = sortedSchedule.findIndex(s => s.id === anchorShiftId);
+      return { prev: idx>0 ? sortedSchedule[idx-1] : null, next: (idx>=0 && idx+1<sortedSchedule.length) ? sortedSchedule[idx+1] : null };
+    }
+    function durationHours(s){ return hoursBetweenISO(s.start, s.end); }
+    function gapHours(aEndISO, bStartISO){ return (new Date(bStartISO) - new Date(aEndISO))/3600000; }
+    function sumWeekHours(schedule, whenDateISO){
+      const d = new Date(whenDateISO);
+      const ws = weekStart(d);
+      const we = weekEnd(d);
+      let total = 0;
+      for (const s of schedule){
+        const sd = new Date(s.start);
+        if (sd >= ws && sd < we){ total += durationHours(s); }
+      }
+      return total;
+    }
+    function pillText(s){
+      const f1 = fmt(s.start), f2 = fmt(s.end);
+      return `${s.title} • ${f1.dstr} • ${f1.t}–${f2.t}`;
+    }
+
+    function renderOptionAComparison({me, partner, myShift, theirShift}){
+      // Build swapped clones
+      const mineOrig = cloneScheduleFor(me);
+      const theirsOrig = cloneScheduleFor(partner);
+      const sB_for_A = {...theirShift, person: me, id: `${me}|${theirShift.start}|${theirShift.end}|${theirShift.title}`};
+      const sA_for_B = {...myShift, person: partner, id: `${partner}|${myShift.start}|${myShift.end}|${myShift.title}`};
+      const mineNew = insertSwapAndSort(mineOrig, myShift.id, sB_for_A);
+      const theirsNew = insertSwapAndSort(theirsOrig, theirShift.id, sA_for_B);
+      const aPos = findPrevNext(mineNew, sB_for_A.id);
+      const bPos = findPrevNext(theirsNew, sA_for_B.id);
+
+      const aPrevGap = aPos.prev ? gapHours(aPos.prev.end, sB_for_A.start) : null;
+      const aNextGap = aPos.next ? gapHours(sB_for_A.end, aPos.next.start) : null;
+      const bPrevGap = bPos.prev ? gapHours(bPos.prev.end, sA_for_B.start) : null;
+      const bNextGap = bPos.next ? gapHours(sA_for_B.end, bPos.next.start) : null;
+
+      const aWeekTotal = sumWeekHours(mineNew, sB_for_A.start);
+      const bWeekTotal = sumWeekHours(theirsNew, sA_for_B.start);
+      const aCapOk = aWeekTotal <= 60.0;
+      const bCapOk = bWeekTotal <= 60.0;
+
+      function row(s){ if(!s) return "—"; const f1 = fmt(s.start), f2 = fmt(s.end); return `${s.title} • ${f1.dstr} • ${f1.t}–${f2.t}`; }
+
+      function cardHTML(personName, newShift, pos, prevGap, nextGap, weekTotal, capOk){
+        const prevOK = pos.prev ? (prevGap >= (durationHours(pos.prev))) : true;
+        const nextOK = pos.next ? (nextGap >= (durationHours(newShift))) : true;
+        const fOK = capOk && prevOK && nextOK;
+        return `
+          <div class="compare-card">
+            <div class="cc-head">
+              <div class="cc-name">${personName}</div>
+              <div class="cc-badge ${fOK ? "good" : "warn"}">${fOK ? "✅ All clear" : "⚠ Review gaps/weekly cap"}</div>
+            </div>
+            <div class="big-num" title="Weekly total (Mon–Sun)">${weekTotal.toFixed(1)}h / 60h</div>
+
+            <div class="cc-meta">
+              <div class="cc-cell">
+                <div class="lab">Prev gap</div>
+                <div>${prevGap !== null ? prevGap.toFixed(1) + "h" : "—"}</div>
+              </div>
+              <div class="cc-cell">
+                <div class="lab">Next gap</div>
+                <div>${nextGap !== null ? nextGap.toFixed(1) + "h" : "—"}</div>
+              </div>
+              <div class="cc-cell">
+                <div class="lab">New duration</div>
+                <div>${durationHours(newShift).toFixed(1)}h</div>
+              </div>
+            </div>
+
+            <div class="pill-row">
+              ${pos.prev ? `<span class="pill">${pillText(pos.prev)}</span>` : `<span class="pill">—</span>`}
+              <span class="pill new">${pillText(newShift)}</span>
+              ${pos.next ? `<span class="pill">${pillText(pos.next)}</span>` : `<span class="pill">—</span>`}
+            </div>
+
+            <table class="cc-table" aria-label="Nearby shifts">
+              <thead><tr><th style="width:28%">When</th><th>Shift</th><th style="width:28%">Time</th></tr></thead>
+              <tbody>
+                <tr><td>Prev</td><td>${row(pos.prev)}</td><td>${pos.prev ? fmt(pos.prev.start).t + " – " + fmt(pos.prev.end).t : "—"}</td></tr>
+                <tr><td><strong>New</strong></td><td><strong>${pillText(newShift)}</strong></td><td><strong>${fmt(newShift.start).t} – ${fmt(newShift.end).t}</strong></td></tr>
+                <tr><td>Next</td><td>${row(pos.next)}</td><td>${pos.next ? fmt(pos.next.start).t + " – " + fmt(pos.next.end).t : "—"}</td></tr>
+              </tbody>
+            </table>
+          </div>
+        `;
+      }
+
+      compareWrap.innerHTML = [
+        cardHTML(me, sB_for_A, aPos, aPrevGap, aNextGap, aWeekTotal, aCapOk),
+        cardHTML(partner, sA_for_B, bPos, bPrevGap, bNextGap, bWeekTotal, bCapOk)
+      ].join("");
     }
 
     async function fetchOptions(){
@@ -1126,7 +1141,7 @@ lmk and I’ll make it official 😎
       }
       const data = await r.json();
       const all = data.candidates
-        .map(c => ({ partner: c.tradee_person, shift: c.tradee_shift, vacation: c.vacation_hint, vdetail: c.vacation_detail }))
+        .map(c => ({ partner: c.tradee_person, shift: c.tradee_shift }))
         .sort((a,b)=> a.shift.start.localeCompare(b.shift.start));
 
       results.innerHTML = "";
@@ -1135,10 +1150,9 @@ lmk and I’ll make it official 😎
         return;
       }
 
-      const personName = meSel.value;
       const mine = SHIFTS.find(x => x.id === shiftId);
 
-      all.forEach(({partner, shift: s, vacation, vdetail})=>{
+      all.forEach(({partner, shift: s})=>{
         const f1 = fmt(s.start), f2 = fmt(s.end);
         const dur = hoursBetweenISO(s.start, s.end).toFixed(1);
 
@@ -1150,68 +1164,48 @@ lmk and I’ll make it official 😎
         const title = document.createElement("div");
         title.className = "title";
         title.textContent = s.title;
-
         const subRow = document.createElement("div");
         subRow.className = "sub";
         subRow.textContent = `${f1.dstr} ${f1.t} · ${f2.t} • ${dur}h`;
-
         const wk = weekendBadgeEl(s.start);
         if (wk){ subRow.appendChild(document.createTextNode(" ")); subRow.appendChild(wk); }
-
         meta.appendChild(title); meta.appendChild(subRow);
-
-        const rightWrap = document.createElement("div");
-        rightWrap.style.display = "flex";
-        rightWrap.style.alignItems = "center";
-
-        if (vacation){
-          const infoBtn = document.createElement("button");
-          infoBtn.className = "info-badge";
-          infoBtn.type = "button";
-          infoBtn.title = "Possible vacation/off-service context";
-          infoBtn.textContent = "?";
-          infoBtn.addEventListener("click", ()=>{
-            const parts = [];
-            if (vdetail?.tradee_receives_on_offrun) parts.push(`${partner} would receive your shift during a ≥5-day off stretch.`);
-            if (vdetail?.trader_receives_on_offrun) parts.push(`You would receive their shift during a ≥5-day off stretch.`);
-            const extra = parts.length ? "\\n\\nDetails:\\n– " + parts.join("\\n– ") : "";
-            infoText.textContent =
-`This orange question mark indicates that the received shift falls on a stretch of at least five consecutive off days (no shifts starting that day) for the recipient, based on the hypothetical post-trade schedules in Eastern time.${extra}`;
-            $("#infoBackdrop").style.display = "flex";
-          });
-          rightWrap.appendChild(infoBtn);
-        }
 
         const offer = document.createElement("button");
         offer.className = "offer";
         offer.textContent = "Offer";
         offer.onclick = async ()=>{
-          // Show loader overlay while rechecking
-          showLoader("Rechecking rules…");
+          // Keep your global loader during validation for now
+          showLoader("Validating trade…");
+
           const r2 = await fetch("/trade-recheck",{
             method:"POST",
             headers: {"Content-Type":"application/json"},
             body: JSON.stringify({ trader_shift_id: mine.id, tradee_shift_id: s.id })
           });
           const data2 = await r2.json();
-          hideLoader();
+
           if (data2.ok){
-            CURRENT_TRADE = { me: personName, partner, myShift: mine, theirShift: s };
-            modal.style.display = "flex";
-            const myF1b = fmt(mine.start), myF2b = fmt(mine.end);
-            const thF1b = fmt(s.start), thF2b = fmt(s.end);
-            modaldesc.textContent = `${personName} → ${partner} • Offer: ${mine.title} (${myF1b.dstr} ${myF1b.t} → ${myF2b.t}) ↔ Receive: ${s.title} (${thF1b.dstr} ${thF1b.t} → ${thF2b.t})`;
-            setTone("professional");
+            const me = meSel.value;
+            CURRENT_TRADE = { me, partner, myShift: mine, theirShift: s };
+
+            // Build comparison (Option A) and message
+            renderOptionAComparison(CURRENT_TRADE);
+            msgbox.value = buildMessage("professional", me, partner, mine, s);
+            [tonePro, toneDes, toneSil].forEach(btn => btn.setAttribute("aria-pressed", "false"));
+            tonePro.setAttribute("aria-pressed","true");
             setCopyState(false);
+
+            hideLoader();
+            modal.style.display = "flex";
           } else {
+            hideLoader();
             alert("This pair failed recheck: " + data2.reason);
           }
         };
 
-        rightWrap.appendChild(offer);
-
         card.appendChild(meta);
-        card.appendChild(rightWrap);
+        card.appendChild(offer);
         results.appendChild(card);
       });
     }
@@ -1220,16 +1214,9 @@ lmk and I’ll make it official 😎
     meSel.addEventListener("change", ()=>{ populateMyShifts(); });
     myShiftSel.addEventListener("change", ()=> selectMyShift(myShiftSel.value));
     $("#refresh").addEventListener("click", loadShifts);
-
-    // Offer modal close
     closex.addEventListener("click", ()=> modal.style.display = "none");
     modal.addEventListener("click", (e)=>{ if(e.target === modal) modal.style.display = "none"; });
 
-    // Info modal close
-    infoClose.addEventListener("click", ()=> $("#infoBackdrop").style.display = "none");
-    $("#infoBackdrop").addEventListener("click", (e)=>{ if(e.target === $("#infoBackdrop")) $("#infoBackdrop").style.display = "none"; });
-
-    // Tone + Copy
     tonePro.addEventListener("click", ()=> setTone("professional"));
     toneDes.addEventListener("click", ()=> setTone("desperate"));
     toneSil.addEventListener("click", ()=> setTone("silly"));
@@ -1245,10 +1232,7 @@ lmk and I’ll make it official 😎
       }
     });
 
-    (function init(){
-      initTheme();
-      loadShifts();
-    })();
+    (function init(){ initTheme(); loadShifts(); })();
   </script>
 </body>
 </html>
