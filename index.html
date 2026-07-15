@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>The Shift Exchange — JMH / HCH</title>
+  <meta name="description" content="Shift trading for JMH/HCH emergency medicine residents" />
+  <script>
+    try {
+      const t = localStorage.getItem("ink-theme");
+      if (t === "dark" || (!t && matchMedia("(prefers-color-scheme: dark)").matches)) {
+        document.documentElement.dataset.theme = "dark";
+      }
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+
+  <header class="masthead">
+    <p class="kicker">Jackson Memorial &times; Holy Cross &middot; Emergency Medicine</p>
+    <h1 class="mast-title">The Shift Exchange</h1>
+    <p class="date-line"><span id="dateline"></span> &middot; future shifts only</p>
+  </header>
+
+  <div class="toolbar" id="toolbar">
+    <div class="toolbar-inner">
+      <label class="me-label" for="me">
+        <span>Trading as</span>
+        <select id="me" disabled aria-label="Your name"></select>
+      </label>
+      <div class="toolbar-actions">
+        <span class="freshness" id="freshness"></span>
+        <button id="refresh" class="icon-btn" aria-label="Refresh schedules" title="Refresh schedules">
+          <i data-lucide="refresh-cw"></i>
+        </button>
+        <button id="theme" class="icon-btn" aria-label="Toggle theme" title="Toggle theme">
+          <i data-lucide="moon" id="themeIcon"></i>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <main class="layout">
+    <section class="panel">
+      <h2 class="section-title"><span class="numeral">I.</span> Your shifts</h2>
+      <p class="section-hint">Choose the shift you want to trade away.</p>
+      <div id="mine" class="stack scroll-area"></div>
+    </section>
+
+    <section class="panel">
+      <h2 class="section-title"><span class="numeral">II.</span> Valid trades</h2>
+      <p class="section-hint" id="tradesHint">
+        Every option below already passes the rules.
+        <span class="stamp stamp-amber stamp-inline">ED/Tra</span> = they work ED or Trauma during your shift&rsquo;s week.
+      </p>
+      <div id="trades" class="stack scroll-area"></div>
+    </section>
+  </main>
+
+  <footer class="colophon">
+    <span class="fleuron">&#10086;</span>
+    <p>Rest &ge; prior shift&rsquo;s length &middot; 60 hours per Mon&ndash;Sun week &middot; trauma, ultrasound &amp; sick call excluded</p>
+  </footer>
+
+  <div class="sheet-backdrop" id="backdrop" hidden>
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+      <button class="sheet-close" id="closeSheet" aria-label="Close">
+        <i data-lucide="x"></i>
+      </button>
+      <p class="sheet-kicker">Memorandum of exchange</p>
+      <h3 class="sheet-title" id="sheetTitle"></h3>
+
+      <div class="compare" id="compare"></div>
+      <p class="rules-note">Week = Mon&ndash;Sun by shift start &middot; rest rule: gap &ge; prior shift&rsquo;s duration &middot; 60h weekly cap</p>
+
+      <div class="composer">
+        <div class="composer-bar">
+          <div class="tones" role="tablist" aria-label="Message tone">
+            <button data-tone="professional" role="tab" aria-pressed="true">Professional</button>
+            <button data-tone="desperate" role="tab" aria-pressed="false">Desperate</button>
+            <button data-tone="silly" role="tab" aria-pressed="false">Silly</button>
+          </div>
+          <button id="copyBtn" class="copy-btn">
+            <i data-lucide="feather"></i><span id="copyLabel">Copy note</span>
+          </button>
+        </div>
+        <textarea id="msg" class="note-paper" readonly rows="9" aria-label="Trade proposal message"></textarea>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
