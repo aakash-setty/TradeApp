@@ -1,4 +1,4 @@
-[
+export default [
   {
     "name": "Aakash",
     "url": "https://app.qgenda.com/ical?key=c7d07a13-e978-464c-bf50-42d8e92b9d8c"
@@ -71,13 +71,12 @@
     "name": "Priscilla",
     "url": "https://app.qgenda.com/ical?key=34942cd1-0afb-4672-ab5e-252a1c8883a4"
   },
-    {
+  {
     "name": "Erick",
-    "url":  "https://app.qgenda.com/ical?key=efe6d620-f717-4d28-affd-61cd18ee97bc"
-    },
-    {
+    "url": "https://app.qgenda.com/ical?key=efe6d620-f717-4d28-affd-61cd18ee97bc"
+  },
+  {
     "name": "Luciano",
-    "url":  "https://app.qgenda.com/ical?key=5a099fe2-d94f-4706-bd5e-e944a31251cd"
-    }
-  
-]
+    "url": "https://app.qgenda.com/ical?key=5a099fe2-d94f-4706-bd5e-e944a31251cd"
+  }
+];

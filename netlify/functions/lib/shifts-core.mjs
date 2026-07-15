@@ -1,7 +1,5 @@
 import ical from "node-ical";
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
+import CALENDARS from "./calendars.data.mjs";
 
 // How far back to include events. Recent-past shifts give the client full
 // Mon-Sun week context (ED/Tra badge, week timelines) even for the current week.
@@ -11,7 +9,7 @@ function loadCalendars() {
   if (process.env.CALENDARS_JSON) {
     return JSON.parse(process.env.CALENDARS_JSON);
   }
-  return require("../calendars.json");
+  return CALENDARS;
 }
 
 // node-ical builds date-only (all-day) values with server-local Date parts,
