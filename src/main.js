@@ -10,6 +10,7 @@ import confetti from "canvas-confetti";
 import {
   buildData,
   tradeOptions,
+  threeWayOptions,
   simulateSwapOk,
   personWorksEdTraInWeek,
   isWeekendStart,
@@ -28,9 +29,11 @@ const refreshIcons = () => createIcons({ icons: ICONS });
 let DATA = null;
 let ME = null;
 let SELECTED = null;
-let TONE = "professional";
 let TRADE = null;
 let OPTION_INDEX = new Map();
+let INCLUDE_3WAY = false;
+let _threeTimer = null;
+let SHEET3 = null;
 
 // ---------------- Formatting ----------------
 
@@ -45,6 +48,17 @@ const mon = (d) => d.toLocaleDateString("en-US", { month: "short" });
 function fmtDur(s) {
   const h = durationHours(s);
   return (h % 1 ? h.toFixed(1) : String(h)) + "h";
+}
+// Compact clock for the date tile: 9:00 AM -> "9a", 3:30 PM -> "3:30p"
+function compactTime(d) {
+  let h = d.getHours();
+  const m = d.getMinutes();
+  const ap = h >= 12 ? "p" : "a";
+  h = h % 12 || 12;
+  return (m ? `${h}:${String(m).padStart(2, "0")}` : `${h}`) + ap;
+}
+function compactRange(s) {
+  return `${compactTime(s.start)}–${compactTime(s.end)}`;
 }
 
 // ---------------- Theme ----------------
@@ -127,7 +141,7 @@ function dateTile(s) {
   return `<div class="date-tile ${wkndTile ? "wkend" : ""}">
     <span class="dow">${dow(s.start)}</span>
     <span class="dom">${s.start.getDate()}</span>
-    <span class="mon">${mon(s.start)}</span>
+    <span class="tt">${compactRange(s)}</span>
   </div>`;
 }
 
@@ -143,11 +157,21 @@ function weekendStamp(s) {
 function enterAnimate(scope) {
   const els = document.querySelectorAll(`${scope} .card.enter`);
   if (!els.length) return;
+  const reveal = () => els.forEach((el) => { el.style.opacity = "1"; el.style.transform = "none"; });
+  // Cap total stagger so long lists (e.g. 3-way results) don't crawl in.
+  const step = Math.min(0.035, 0.8 / els.length);
   try {
-    animate(els, { opacity: [0, 1], transform: ["translateY(9px)", "translateY(0px)"] }, { delay: stagger(0.035), duration: 0.4, ease: "easeOut" });
+    const anim = animate(
+      els,
+      { opacity: [0, 1], transform: ["translateY(9px)", "translateY(0px)"] },
+      { delay: stagger(step), duration: 0.4, ease: "easeOut" }
+    );
+    if (anim && anim.finished && typeof anim.finished.then === "function") anim.finished.then(reveal).catch(() => {});
   } catch (e) {
-    els.forEach((el) => (el.style.opacity = 1));
+    reveal();
   }
+  // Safety net: guarantee visibility even if the animation is throttled or interrupted.
+  setTimeout(reveal, (step * els.length + 0.5) * 1000);
 }
 
 function renderMine() {
@@ -173,7 +197,6 @@ function renderMine() {
         ${dateTile(s)}
         <div class="card-body">
           <div class="card-title">${esc(s.title)}</div>
-          <div class="card-sub">${fmtTime(s.start)} &ndash; ${fmtTime(s.end)} &middot; ${fmtDur(s)}</div>
           <div class="dur-bar"><div class="dur-fill" style="width:${durPct.toFixed(0)}%"></div></div>
           ${stampRow([weekendStamp(s)].filter(Boolean))}
         </div>
@@ -185,35 +208,80 @@ function renderMine() {
   renderTrades();
 }
 
+function emptyMsg(text) {
+  return `<div class="empty"><span class="fleuron">&#10086;</span>${text}</div>`;
+}
+
 function renderTrades() {
   const box = $("#trades");
   OPTION_INDEX = new Map();
+  clearTimeout(_threeTimer);
 
   const mineShift = DATA && DATA.flat.find((s) => s.id === SELECTED);
   if (!mineShift) {
-    box.innerHTML = `<div class="empty"><span class="fleuron">&#10086;</span>Choose one of your shifts to see who can take it.</div>`;
+    box.innerHTML = emptyMsg("Choose one of your shifts to see who can take it.");
     return;
   }
 
-  const opts = tradeOptions(DATA.flat, DATA.schedules, mineShift);
-  if (!opts.length) {
-    box.innerHTML = `<div class="empty"><span class="fleuron">&#10086;</span>No valid trades for that shift right now &mdash; try another.</div>`;
+  if (INCLUDE_3WAY) {
+    // 3-way search is heavier; paint a loader first, then compute on the next tick.
+    box.innerHTML = `<div class="trades-loading"><span class="spin" aria-hidden="true"></span>Finding 2-way &amp; 3-way trades&hellip;</div>`;
+    _threeTimer = setTimeout(() => buildTradesList(mineShift, true), 20);
+  } else {
+    buildTradesList(mineShift, false);
+  }
+}
+
+function buildTradesList(mineShift, include3) {
+  const box = $("#trades");
+
+  const direct = tradeOptions(DATA.flat, DATA.schedules, mineShift);
+  const directIds = new Set(direct.map((s) => s.id));
+  const entries = direct.map((s) => ({ type: "direct", acquire: s }));
+
+  if (include3) {
+    for (const g of threeWayOptions(DATA.flat, DATA.schedules, mineShift)) {
+      if (directIds.has(g.acquire.id)) continue; // a simpler direct route already covers this shift
+      entries.push({ type: "3way", acquire: g.acquire, from: g.from, middles: g.middles });
+    }
+  }
+
+  if (!entries.length) {
+    box.innerHTML = emptyMsg(
+      include3 ? "No 2-way or 3-way trades for that shift right now." : "No valid trades for that shift right now &mdash; try another."
+    );
     return;
+  }
+
+  entries.sort((a, b) => a.acquire.start - b.acquire.start || a.acquire.person.localeCompare(b.acquire.person));
+
+  const weekGroups = new Map();
+  for (const e of entries) {
+    const k = weekStart(e.acquire.start).getTime();
+    if (!weekGroups.has(k)) weekGroups.set(k, []);
+    weekGroups.get(k).push(e);
   }
 
   let html = "";
-  for (const [ws, shifts] of groupByWeek(opts)) {
+  for (const [ws, group] of weekGroups) {
     html += `<div class="week-head">Week of ${fmtMonDay(new Date(Number(ws)))}</div>`;
-    for (const s of shifts) {
-      OPTION_INDEX.set(s.id, s);
-      const edtra = personWorksEdTraInWeek(DATA.all, s.person, mineShift.start)
+    for (const e of group) {
+      const s = e.acquire;
+      OPTION_INDEX.set(s.id, e);
+      const person = e.type === "3way" ? e.from : s.person;
+      const edtra = personWorksEdTraInWeek(DATA.all, person, mineShift.start)
         ? `<span class="stamp stamp-amber">ED/Tra</span>` : "";
+      const typeStamp = e.type === "3way" ? `<span class="stamp stamp-3way">3-way</span>` : "";
+      const chain =
+        e.type === "3way"
+          ? `<div class="chain-hint">${esc(e.middles[0].person)} takes yours${e.middles.length > 1 ? ` &middot; +${e.middles.length - 1} route${e.middles.length - 1 > 1 ? "s" : ""}` : ""}</div>`
+          : "";
       html += `<div class="card enter" data-id="${esc(s.id)}">
         ${dateTile(s)}
         <div class="card-body">
-          <div class="card-title"><span class="with">with ${esc(s.person)}</span> &middot; ${esc(s.title)}</div>
-          <div class="card-sub">${fmtTime(s.start)} &ndash; ${fmtTime(s.end)} &middot; ${fmtDur(s)}</div>
-          ${stampRow([weekendStamp(s), edtra].filter(Boolean))}
+          <div class="card-title"><span class="with">with ${esc(person)}</span> &middot; ${esc(s.title)}</div>
+          ${chain}
+          ${stampRow([weekendStamp(s), edtra, typeStamp].filter(Boolean))}
         </div>
         <button class="review-btn" data-id="${esc(s.id)}">Review</button>
       </div>`;
@@ -314,59 +382,30 @@ function findPrevNext(sorted, id) {
   };
 }
 
-function openSheet(theirShift) {
-  const mineShift = DATA.flat.find((s) => s.id === SELECTED);
-  if (!mineShift) return;
+const cloneFor = (person, s) => ({ ...s, person, id: `${person}|${s.start.getTime()}|${s.end.getTime()}|${s.title}` });
 
-  const [ok] = simulateSwapOk(DATA.schedules, mineShift, theirShift);
-  if (!ok) {
-    renderTrades();
-    return;
-  }
+function sumWeek(sched, anchor) {
+  const ws = weekStart(anchor), we = weekEnd(anchor);
+  let t = 0;
+  for (const s of sched) if (s.start >= ws && s.start < we) t += durationHours(s);
+  return t;
+}
 
-  const partner = theirShift.person;
-  TRADE = { me: ME, partner, myShift: mineShift, theirShift };
-
-  const cloneFor = (person, s) => ({ ...s, person, id: `${person}|${s.start.getTime()}|${s.end.getTime()}|${s.title}` });
-  const sBforA = cloneFor(ME, theirShift);
-  const sAforB = cloneFor(partner, mineShift);
-
-  const mineNew = (DATA.schedules.get(ME) || []).filter((x) => x.id !== mineShift.id).concat([sBforA]).sort((a, b) => a.start - b.start);
-  const theirsNew = (DATA.schedules.get(partner) || []).filter((x) => x.id !== theirShift.id).concat([sAforB]).sort((a, b) => a.start - b.start);
-
-  const aPos = findPrevNext(mineNew, sBforA.id);
-  const bPos = findPrevNext(theirsNew, sAforB.id);
-
-  const sumWeek = (sched, anchor) => {
-    const ws = weekStart(anchor), we = weekEnd(anchor);
-    let t = 0;
-    for (const s of sched) if (s.start >= ws && s.start < we) t += durationHours(s);
-    return t;
+// Build the folioHTML input for one participant who gives up `giveShift`
+// (a real shift on their calendar) and takes on `receiveShift`.
+function buildFolio(name, isMe, giveShift, receiveShift) {
+  const clone = cloneFor(name, receiveShift);
+  const sched = (DATA.schedules.get(name) || []).filter((x) => x.id !== giveShift.id).concat([clone]).sort((a, b) => a.start - b.start);
+  const pos = findPrevNext(sched, clone.id);
+  return {
+    name, isMe, gives: giveShift, gets: clone, removed: giveShift, schedule: sched, pos,
+    prevGap: pos.prev ? gapHours(pos.prev.end, clone.start) : null,
+    nextGap: pos.next ? gapHours(clone.end, pos.next.start) : null,
+    weekTotal: sumWeek(sched, clone.start),
   };
+}
 
-  $("#sheetTitle").innerHTML = `An exchange with <em>${esc(partner)}</em>`;
-  $("#compare").innerHTML =
-    folioHTML({
-      name: ME, isMe: true, gives: mineShift, gets: sBforA, removed: mineShift, schedule: mineNew, pos: aPos,
-      prevGap: aPos.prev ? gapHours(aPos.prev.end, sBforA.start) : null,
-      nextGap: aPos.next ? gapHours(sBforA.end, aPos.next.start) : null,
-      weekTotal: sumWeek(mineNew, sBforA.start),
-    }) +
-    folioHTML({
-      name: partner, isMe: false, gives: theirShift, gets: sAforB, removed: theirShift, schedule: theirsNew, pos: bPos,
-      prevGap: bPos.prev ? gapHours(bPos.prev.end, sAforB.start) : null,
-      nextGap: bPos.next ? gapHours(sAforB.end, bPos.next.start) : null,
-      weekTotal: sumWeek(theirsNew, sAforB.start),
-    });
-
-  setTone("professional");
-  setCopied(false);
-
-  const backdrop = $("#backdrop");
-  backdrop.hidden = false;
-  document.body.style.overflow = "hidden";
-  refreshIcons();
-
+function animateSheet() {
   requestAnimationFrame(() => {
     document.querySelectorAll("#compare .ledger-fill").forEach((el) => {
       el.style.width = el.dataset.width + "%";
@@ -382,68 +421,137 @@ function openSheet(theirShift) {
   });
 }
 
+function showBackdrop() {
+  $("#backdrop").hidden = false;
+  document.body.style.overflow = "hidden";
+  refreshIcons();
+}
+
+function openSheet(theirShift) {
+  const mineShift = DATA.flat.find((s) => s.id === SELECTED);
+  if (!mineShift) return;
+
+  const [ok] = simulateSwapOk(DATA.schedules, mineShift, theirShift);
+  if (!ok) { renderTrades(); return; }
+
+  const partner = theirShift.person;
+  TRADE = { kind: "direct", me: ME, partner, myShift: mineShift, theirShift };
+
+  $("#sheetTitle").innerHTML = `An exchange with <em>${esc(partner)}</em>`;
+  $("#loopArea").innerHTML = "";
+  const compare = $("#compare");
+  compare.className = "compare";
+  compare.innerHTML =
+    folioHTML(buildFolio(ME, true, mineShift, theirShift)) +
+    folioHTML(buildFolio(partner, false, theirShift, mineShift));
+
+  fillSummary();
+  setCopied(false);
+  animateSheet();
+  showBackdrop();
+}
+
+// ---------------- 3-way sheet ----------------
+
+function open3Way(entry) {
+  SHEET3 = { entry, midIdx: 0 };
+  setCopied(false);
+  render3Way();
+  showBackdrop();
+}
+
+function render3Way() {
+  const { entry, midIdx } = SHEET3;
+  const mineShift = DATA.flat.find((s) => s.id === SELECTED);
+  const sC = entry.acquire;
+  const C = entry.from;
+  const sB = entry.middles[midIdx];
+  const B = sB.person;
+
+  TRADE = { kind: "3way", me: ME, myShift: mineShift, acquire: sC, bPerson: B, bShift: sB, cPerson: C };
+
+  $("#sheetTitle").innerHTML = `A 3-way loop with <em>${esc(B)}</em> &amp; <em>${esc(C)}</em>`;
+  $("#loopArea").innerHTML = loopDiagram(ME, mineShift, B, sB, C, sC) + (entry.middles.length > 1 ? middleSelector(entry, midIdx) : "");
+
+  const compare = $("#compare");
+  compare.className = "compare compare-3";
+  compare.innerHTML =
+    folioHTML(buildFolio(ME, true, mineShift, sC)) + // you give yours, get C's
+    folioHTML(buildFolio(B, false, sB, mineShift)) + // B gives theirs, gets yours
+    folioHTML(buildFolio(C, false, sC, sB));         // C gives theirs, gets B's
+
+  fillSummary();
+  animateSheet();
+  refreshIcons();
+}
+
+function loopNode(name, role) {
+  return `<div class="loop-node"><div class="loop-name">${esc(name)}</div>${role ? `<div class="loop-role">${role}</div>` : ""}</div>`;
+}
+function loopArrow(s) {
+  return `<div class="loop-arrow"><span class="loop-pass">${esc(s.title)}</span><span class="loop-line"></span><span class="loop-when">${fmtMonDay(s.start)}</span></div>`;
+}
+function loopDiagram(me, sA, B, sB, C, sC) {
+  return `<div class="loop-diagram" aria-label="Trade loop">
+    ${loopNode(me + " (you)", "give")}
+    ${loopArrow(sA)}
+    ${loopNode(B, "")}
+    ${loopArrow(sB)}
+    ${loopNode(C, "")}
+    ${loopArrow(sC)}
+    ${loopNode(me + " (you)", "receive")}
+  </div>`;
+}
+function middleSelector(entry, midIdx) {
+  const chips = entry.middles
+    .map((sB, i) => `<button class="mid-chip ${i === midIdx ? "on" : ""}" data-mid="${i}">${esc(sB.person)} &middot; ${fmtMonDay(sB.start)}</button>`)
+    .join("");
+  return `<div class="mid-select"><span class="mid-label">Middle person &mdash; ${entry.middles.length} options:</span><div class="mid-chips">${chips}</div></div>`;
+}
+
 function closeSheet() {
   $("#backdrop").hidden = true;
   document.body.style.overflow = "";
 }
 
-// ---------------- Message composer ----------------
+// ---------------- Trade summary ----------------
 
-function buildMessage(tone) {
-  const { me, partner, myShift, theirShift } = TRADE;
-  const give = `${myShift.title} — ${fmtDayFull(myShift.start)} ${fmtTime(myShift.start)} → ${fmtTime(myShift.end)}`;
-  const get = `${theirShift.title} — ${fmtDayFull(theirShift.start)} ${fmtTime(theirShift.start)} → ${fmtTime(theirShift.end)}`;
-
-  if (tone === "desperate") {
-    return `Hey ${partner} 🙏
-Any chance you'd swap with me?
-
-I'd give you:
-• ${give}
-
-And I'd take:
-• ${get}
-
-You'd be saving my week — and it should be fully valid per the rules. Please say yes! 🤞
-— ${me}`;
-  }
-  if (tone === "silly") {
-    return `yo ${partner} 🎉
-
-You down for a trade-sie-poo?
-
-I give you:
-• ${give}
-you present to me your:
-• ${get}
-
-computers say it's legit (i'm p sure) ✅
-lmk and I'll make it official 😎
-— ${me}`;
-  }
-  return `Hi ${partner},
-Would you be open to a shift trade? It would be greatly appreciated.
-
-I'd trade you my:
-• ${give}
-And take your:
-• ${get}
-
-The swap passes our scheduling rules. If that works for you, I'll send a quick confirm. Thanks!
-— ${me}`;
+// "Z2 Eve 1 3p-11p [Setty EM28]" -> "Z2 Eve 1 3p-11p"
+function summaryTitle(s) {
+  return s.title.replace(/\s*\[.*$/, "").trim();
+}
+// Date -> "Friday August 24"
+function summaryDate(d) {
+  return `${d.toLocaleDateString("en-US", { weekday: "long" })} ${d.toLocaleDateString("en-US", { month: "long" })} ${d.getDate()}`;
+}
+function takesLine(receiver, giver, shift) {
+  return `${receiver} will take ${giver}'s shift on ${summaryDate(shift.start)} ${summaryTitle(shift)}.`;
 }
 
-function setTone(tone) {
-  TONE = tone;
-  document.querySelectorAll(".tones button").forEach((b) => {
-    b.setAttribute("aria-pressed", b.dataset.tone === tone ? "true" : "false");
-  });
-  if (TRADE) $("#msg").value = buildMessage(tone);
+function buildSummary() {
+  if (!TRADE) return "";
+  if (TRADE.kind === "3way") {
+    const { me, myShift, acquire, bPerson, bShift, cPerson } = TRADE;
+    return [
+      takesLine(me, cPerson, acquire),     // you take C's shift
+      takesLine(bPerson, me, myShift),      // B takes your shift
+      takesLine(cPerson, bPerson, bShift),  // C takes B's shift
+    ].join(" ");
+  }
+  const { me, partner, myShift, theirShift } = TRADE;
+  return [
+    takesLine(me, partner, theirShift),   // you take partner's shift
+    takesLine(partner, me, myShift),       // partner takes your shift
+  ].join(" ");
+}
+
+function fillSummary() {
+  $("#msg").value = buildSummary();
 }
 
 function setCopied(on) {
   $("#copyBtn").classList.toggle("copied", on);
-  $("#copyLabel").textContent = on ? "Copied" : "Copy note";
+  $("#copyLabel").textContent = on ? "Copied" : "Copy summary";
 }
 
 async function copyNote() {
@@ -506,8 +614,26 @@ function init() {
   $("#trades").addEventListener("click", (e) => {
     const btn = e.target.closest(".review-btn");
     if (!btn) return;
-    const shift = OPTION_INDEX.get(btn.dataset.id);
-    if (shift) openSheet(shift);
+    const entry = OPTION_INDEX.get(btn.dataset.id);
+    if (!entry) return;
+    if (entry.type === "3way") open3Way(entry);
+    else openSheet(entry.acquire);
+  });
+
+  $("#threeWayToggle").addEventListener("click", () => {
+    INCLUDE_3WAY = !INCLUDE_3WAY;
+    const btn = $("#threeWayToggle");
+    btn.setAttribute("aria-pressed", INCLUDE_3WAY ? "true" : "false");
+    btn.classList.toggle("on", INCLUDE_3WAY);
+    $("#threeWayLabel").textContent = INCLUDE_3WAY ? "Showing 2 + 3-way" : "Show 3-way trades";
+    renderTrades();
+  });
+
+  $("#loopArea").addEventListener("click", (e) => {
+    const chip = e.target.closest(".mid-chip");
+    if (!chip || !SHEET3) return;
+    SHEET3.midIdx = Number(chip.dataset.mid);
+    render3Way();
   });
 
   $("#closeSheet").addEventListener("click", closeSheet);
@@ -518,9 +644,6 @@ function init() {
     if (e.key === "Escape" && !$("#backdrop").hidden) closeSheet();
   });
 
-  document.querySelectorAll(".tones button").forEach((b) => {
-    b.addEventListener("click", () => setTone(b.dataset.tone));
-  });
   $("#copyBtn").addEventListener("click", copyNote);
 
   refreshIcons();

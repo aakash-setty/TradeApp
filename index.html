@@ -50,10 +50,16 @@
     </section>
 
     <section class="panel">
-      <h2 class="section-title"><span class="numeral">II.</span> Valid trades</h2>
+      <div class="section-head">
+        <h2 class="section-title"><span class="numeral">II.</span> Valid trades</h2>
+        <button id="threeWayToggle" class="threeway-toggle" aria-pressed="false" aria-label="Include 3-way trades">
+          <span class="tw-dot" aria-hidden="true"></span><span id="threeWayLabel">Show 3-way trades</span>
+        </button>
+      </div>
       <p class="section-hint" id="tradesHint">
         Every option below already passes the rules.
         <span class="stamp stamp-amber stamp-inline">ED/Tra</span> = they work ED or Trauma during your shift&rsquo;s week (higher likelihood of a trade!).
+        <span class="stamp stamp-3way stamp-inline">3-way</span> = a three-person loop.
       </p>
       <div id="trades" class="stack scroll-area"></div>
     </section>
@@ -72,21 +78,18 @@
       <p class="sheet-kicker">Memorandum of exchange</p>
       <h3 class="sheet-title" id="sheetTitle"></h3>
 
+      <div class="loop-area" id="loopArea"></div>
       <div class="compare" id="compare"></div>
       <p class="rules-note">Week = Mon&ndash;Sun by shift start &middot; rest rule: gap &ge; prior shift&rsquo;s duration &middot; 60h weekly cap</p>
 
       <div class="composer">
         <div class="composer-bar">
-          <div class="tones" role="tablist" aria-label="Message tone">
-            <button data-tone="professional" role="tab" aria-pressed="true">Professional</button>
-            <button data-tone="desperate" role="tab" aria-pressed="false">Desperate</button>
-            <button data-tone="silly" role="tab" aria-pressed="false">Silly</button>
-          </div>
+          <div class="summary-label">Trade summary</div>
           <button id="copyBtn" class="copy-btn">
-            <i data-lucide="feather"></i><span id="copyLabel">Copy note</span>
+            <i data-lucide="feather"></i><span id="copyLabel">Copy summary</span>
           </button>
         </div>
-        <textarea id="msg" class="note-paper" readonly rows="9" aria-label="Trade proposal message"></textarea>
+        <textarea id="msg" class="note-paper" readonly rows="4" aria-label="Trade summary"></textarea>
       </div>
     </div>
   </div>

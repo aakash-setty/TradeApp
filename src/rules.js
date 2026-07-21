@@ -165,42 +165,37 @@ function weekCapsOk(primeSched, newShift) {
   return total <= 60.0;
 }
 
+// The atomic per-person check every trade is built from: can the owner of
+// `giveShift` give it up and take on `receiveShift` instead, while keeping
+// their own schedule valid (availability, rest rule, 60h weekly cap)?
+export function personCanTake(schedules, giveShift, receiveShift) {
+  if (!(giveShift.eligible && receiveShift.eligible)) return false;
+  const P = giveShift.person;
+  if (P === receiveShift.person) return false;
+
+  const sched = schedules.get(P) || [];
+  if (!isFreeForInterval(sched, receiveShift.start, receiveShift.end, giveShift.id)) return false;
+
+  const clone = {
+    ...receiveShift,
+    person: P,
+    id: `${P}|${receiveShift.start.getTime()}|${receiveShift.end.getTime()}|${receiveShift.title}`,
+  };
+  const prime = sched.filter((x) => x.id !== giveShift.id).concat([clone]).sort((a, b) => a.start - b.start);
+  const idx = prime.indexOf(clone);
+
+  if (!localBreakOk(prime, idx)) return false;
+  if (!weekCapsOk(prime, clone)) return false;
+  return true;
+}
+
+// 2-way swap: A gives sA and receives sB; B gives sB and receives sA.
+// Both people must independently stay valid — the same as two personCanTake checks.
 export function simulateSwapOk(schedules, traderShift, tradeeShift) {
   if (!(traderShift.eligible && tradeeShift.eligible)) return [false, "ineligible-title"];
-
-  const A = traderShift.person;
-  const B = tradeeShift.person;
-  if (A === B) return [false, "same-person"];
-
-  const sA = traderShift;
-  const sB = tradeeShift;
-  const ASched = schedules.get(A) || [];
-  const BSched = schedules.get(B) || [];
-
-  if (!isFreeForInterval(BSched, sA.start, sA.end, sB.id)) return [false, "B-not-free-for-A"];
-  if (!isFreeForInterval(ASched, sB.start, sB.end, sA.id)) return [false, "A-not-free-for-B"];
-
-  const cloneFor = (person, s) => ({
-    ...s,
-    person,
-    id: `${person}|${s.start.getTime()}|${s.end.getTime()}|${s.title}`,
-  });
-
-  const sBforA = cloneFor(A, sB);
-  const sAforB = cloneFor(B, sA);
-
-  const APrime = ASched.filter((x) => x.id !== sA.id).concat([sBforA]).sort((a, b) => a.start - b.start);
-  const BPrime = BSched.filter((x) => x.id !== sB.id).concat([sAforB]).sort((a, b) => a.start - b.start);
-
-  const aIdx = APrime.indexOf(sBforA);
-  const bIdx = BPrime.indexOf(sAforB);
-
-  if (!localBreakOk(APrime, aIdx)) return [false, "A-break-rule"];
-  if (!localBreakOk(BPrime, bIdx)) return [false, "B-break-rule"];
-
-  if (!weekCapsOk(APrime, sBforA)) return [false, "A-weekly-cap"];
-  if (!weekCapsOk(BPrime, sAforB)) return [false, "B-weekly-cap"];
-
+  if (traderShift.person === tradeeShift.person) return [false, "same-person"];
+  if (!personCanTake(schedules, tradeeShift, traderShift)) return [false, "B-side"];
+  if (!personCanTake(schedules, traderShift, tradeeShift)) return [false, "A-side"];
   return [true, "ok"];
 }
 
@@ -213,6 +208,38 @@ export function tradeOptions(flat, schedules, traderShift) {
   }
   candidates.sort((a, b) => a.start - b.start || a.person.localeCompare(b.person));
   return candidates;
+}
+
+// ---------------- 3-way (cycle) trades ----------------
+// A valid loop A -> B -> C -> A: you (A) give `yourShift` and receive some sC;
+// B receives your shift and gives sB; C receives sB and gives sC. Because no
+// rule spans people, the loop is valid exactly when all three personCanTake
+// checks pass. Results are grouped by the shift YOU acquire (sC), each with the
+// list of possible middle shifts sB (owned by B) that complete the loop.
+export function threeWayOptions(flat, schedules, yourShift) {
+  if (!yourShift || !yourShift.eligible) return [];
+  const A = yourShift.person;
+
+  // Middle candidates: owners who can take YOUR shift (B gives sB, receives yourShift).
+  const OUT = flat.filter((v) => v.eligible && v.person !== A && personCanTake(schedules, v, yourShift));
+  // Acquire candidates: shifts YOU can take (you give yourShift, receive sC).
+  const IN = flat.filter((u) => u.eligible && u.person !== A && personCanTake(schedules, yourShift, u));
+
+  const results = [];
+  for (const sC of IN) {
+    const C = sC.person;
+    const middles = [];
+    for (const sB of OUT) {
+      if (sB.person === C || sB.id === sC.id) continue;
+      if (personCanTake(schedules, sC, sB)) middles.push(sB); // C gives sC, receives sB
+    }
+    if (middles.length) {
+      middles.sort((a, b) => a.start - b.start || a.person.localeCompare(b.person));
+      results.push({ acquire: sC, from: C, middles });
+    }
+  }
+  results.sort((a, b) => a.acquire.start - b.acquire.start || a.from.localeCompare(b.from));
+  return results;
 }
 
 // ---------------- ED/Tra badge ----------------
