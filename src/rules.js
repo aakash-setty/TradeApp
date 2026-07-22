@@ -12,12 +12,16 @@ const ALLOW_PATTERNS = [
   /\be([123])\b/i,
   /\bnight\s*[- ]?\s*([123])\b/i,
   /\bn([123])\b/i,
+  /\bngt\s*[- ]?\s*([123])\b/i,
   /\bpod\s*[- ]?\s*a\s*[- ]?\s*([12])\b/i,
   /\bpod\s*[- ]?\s*b\s*[- ]?\s*([12])\b/i,
   /\bpoda\s*[- ]?\s*([12])\b/i,
   /\bpodb\s*[- ]?\s*([12])\b/i,
   /\bside\b/i,
   /\b([abc])\s*([12])\b/i,
+  /\bdaytr\b/i,
+  /\bngttr\b/i,
+  /\bpeds\b/i,
 ];
 
 export function isEligibleTitle(title) {
