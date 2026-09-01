@@ -78,5 +78,9 @@ export default [
   {
     "name": "Luciano",
     "url": "https://app.qgenda.com/ical?key=5a099fe2-d94f-4706-bd5e-e944a31251cd"
+  },
+  {
+    "name": "Bree",
+    "url": "https://app.qgenda.com/ical?key=fed483b0-3012-4375-b21b-3fe6af56ac46"
   }
 ];
