@@ -82,5 +82,9 @@ export default [
   {
     "name": "Bree",
     "url": "https://app.qgenda.com/ical?key=fed483b0-3012-4375-b21b-3fe6af56ac46"
+  },
+  {
+    "name": "Abie",
+    "url": "https://app.qgenda.com/ical?key=8f083234-20d6-48c7-89b0-9a450aa07700"
   }
 ];
