@@ -86,5 +86,9 @@ export default [
   {
     "name": "Abie",
     "url": "https://app.qgenda.com/ical?key=8f083234-20d6-48c7-89b0-9a450aa07700"
+  },
+  {
+    "name": "Dilraj",
+    "url": "https://app.qgenda.com/ical?key=df499d38-0725-4174-876d-ca1e4a550556"
   }
 ];
