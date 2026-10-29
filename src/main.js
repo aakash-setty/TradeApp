@@ -364,7 +364,7 @@ function personRow(person, leg, legs) {
   }
 
   const low = hAfter < LOW_HOURS
-    ? `<div class="low-note">Under ${LOW_HOURS}h this week. ${esc(person)} is either on a non-EM/trauma rotation or on a vacation week (or that week isn&rsquo;t published yet). Check manually.</div>`
+    ? `<div class="low-note" role="alert"><span class="low-icon" aria-hidden="true">!</span><div><strong>Check manually.</strong> ${esc(person)} is either on a non-EM/trauma rotation or on a vacation week (or that week isn&rsquo;t published yet).</div></div>`
     : "";
 
   return `<div class="pw-row ${person === leg.from ? "is-old" : ""}">
