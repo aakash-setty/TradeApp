@@ -186,6 +186,41 @@ function weekCapsOk(primeSched, newShift) {
   return weekHours(primeSched, newShift.start) <= 60.0;
 }
 
+// ---------------- Consecutive-days rule ----------------
+// No one may work 7 days in a row. A "day worked" is a calendar day on which a shift
+// starts (local time), so an overnight shift counts for the day it begins. All-day
+// calendar entries (vacation, block labels) do not count as days worked.
+// Program rule for 2026-27: every Wednesday counts as a worked day even with no shift
+// that day, except the dates listed below. Update the list each academic year.
+export const MAX_CONSECUTIVE_DAYS = 6;
+export const WEDNESDAY_EXCEPTIONS = ["2026-11-25", "2026-12-23"];
+const WED_EXCEPTION_KEYS = new Set(WEDNESDAY_EXCEPTIONS.map((d) => Number(d.replace(/-/g, ""))));
+
+const dayKey = (d) => d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+// True for a Wednesday that counts as worked even without a shift.
+export function isMandatoryWednesday(d) {
+  return d.getDay() === 3 && !WED_EXCEPTION_KEYS.has(dayKey(d));
+}
+
+// Length of the run of consecutive worked days that includes the day `anchor` starts on.
+export function consecutiveDaysRun(sched, anchor) {
+  const days = new Set();
+  for (const s of sched) if (!s.dateOnly) days.add(dayKey(s.start));
+  const worked = (n) => {
+    const d = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + n);
+    return days.has(dayKey(d)) || isMandatoryWednesday(d);
+  };
+  if (!worked(0)) return 0;
+  let run = 1;
+  for (let i = 1; worked(-i); i++) run++;
+  for (let i = 1; worked(i); i++) run++;
+  return run;
+}
+
+function consecutiveDaysOk(primeSched, newShift) {
+  return consecutiveDaysRun(primeSched, newShift.start) <= MAX_CONSECUTIVE_DAYS;
+}
+
 // The atomic per-person check every trade is built from: can the owner of
 // `giveShift` give it up and take on `receiveShift` instead, while keeping
 // their own schedule valid (availability, rest rule, 60h weekly cap)?
@@ -207,6 +242,7 @@ export function personCanTake(schedules, giveShift, receiveShift) {
 
   if (!localBreakOk(prime, idx)) return false;
   if (!weekCapsOk(prime, clone)) return false;
+  if (!consecutiveDaysOk(prime, clone)) return false;
   return true;
 }
 

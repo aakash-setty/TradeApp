@@ -17,6 +17,8 @@ import {
   isPedsTitle,
   weekHours,
   inferBlock,
+  consecutiveDaysRun,
+  MAX_CONSECUTIVE_DAYS,
   isWeekendStart,
   weekStart,
   weekEnd,
@@ -358,9 +360,12 @@ function personRow(person, leg, legs) {
   if (person === leg.to) {
     const id = cloneFor(person, leg.shift).id;
     rest = restCheck(after, id)
-      .map((r) => `<span class="rest-chip ${r.ok ? "" : "bad"}">${r.label} ${fmtH(r.gap)} ${r.ok ? "✓" : "✗"}<span class="hint"> needs ${fmtH(r.need)}</span></span>`)
+      .map((r) => `<span class="rest-chip ${r.ok ? "" : "bad"}">${r.label}: ${fmtH(r.gap)} ${r.ok ? "✓" : "✗"}<span class="hint"> needs ${fmtH(r.need)}</span></span>`)
       .join("");
     if (!rest) rest = `<span class="rest-chip">No shifts nearby</span>`;
+    const run = consecutiveDaysRun(after, leg.shift.start);
+    const runOk = run <= MAX_CONSECUTIVE_DAYS;
+    rest += `<span class="rest-chip ${runOk ? "" : "bad"}">Days in a row: ${run} ${runOk ? "✓" : "✗"}<span class="hint"> max ${MAX_CONSECUTIVE_DAYS}</span></span>`;
   }
 
   const low = hAfter < LOW_HOURS
@@ -398,7 +403,7 @@ function legColumn(leg, legs, heading) {
   const s = leg.shift;
   const ws = weekStart(s.start), we = weekEnd(s.start);
   return `<div class="leg">
-    <div class="leg-week">${heading} &middot; week of ${fmtMonDay(ws)} &ndash; ${fmtMonDay(new Date(we - 1))} <span class="soft">(after trade)</span></div>
+    <div class="leg-week"><span class="after">AFTER</span> Trading: Week of ${fmtMonDay(ws)} &ndash; ${fmtMonDay(new Date(we - 1))}</div>
     ${personRow(leg.from, leg, legs)}
     ${personRow(leg.to, leg, legs)}
   </div>`;

@@ -730,3 +730,11 @@ html[data-theme="dark"] .stamp-peds { color: #8cc6dc; background: #13262e; }
 
 .pw-cell .val.low { color: var(--danger); }
 .pw-row.is-old .pw-cell .val.low { color: var(--ink-faint); }
+
+/* Week panel title: "AFTER Trading: Week of ..." */
+.leg .leg-week {
+  font-family: var(--serif); font-size: 19px; font-weight: 600;
+  letter-spacing: 0; text-transform: none; color: var(--ink);
+  padding-bottom: 8px; border-bottom: 1px solid var(--line-strong);
+}
+.leg .leg-week .after { font-family: var(--sans); font-size: 14px; font-weight: 800; letter-spacing: 0.12em; color: var(--accent); margin-right: 2px; }
