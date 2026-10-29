@@ -637,3 +637,76 @@ html[data-theme="dark"] .stamp-3way:not(.stamp-inline) { color: var(--paper); }
   .section-head { flex-wrap: wrap; gap: 8px; }
   .sheet { padding: 22px 15px 18px; }
 }
+
+/* ---------------- Review sheet: one column per shift that changes hands ---------------- */
+.stamp-peds { color: #1f5f7a; background: #dcecf2; }
+html[data-theme="dark"] .stamp-peds { color: #8cc6dc; background: #13262e; }
+.stamp-inline.stamp-peds { transform: none; }
+
+.compare.legs-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.compare.legs-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 860px) { .compare.legs-2, .compare.legs-3 { grid-template-columns: 1fr; } }
+
+.leg {
+  background: var(--paper-inset);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.leg-kicker { font-size: 10.5px; font-weight: 660; letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent); }
+.leg-shift { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.leg-shift .what { font-weight: 640; font-size: 14.5px; }
+.leg-shift .when { color: var(--ink-soft); font-size: 12.5px; margin-top: 3px; }
+.leg-shift .flow { color: var(--ink-faint); font-size: 12px; margin-top: 4px; }
+.leg-week { font-size: 10.5px; font-weight: 640; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft); }
+.leg-week .soft, .pw-cell .soft { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--ink-faint); }
+
+.pw-row { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.pw-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.pw-name { font-family: var(--serif); font-size: 16px; font-weight: 620; display: flex; align-items: center; gap: 8px; }
+.pw-role { font-size: 11.5px; color: var(--ink-faint); }
+.pw-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pw-cell .lab { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 2px; }
+.pw-cell .val { font-size: 14px; font-weight: 640; }
+.pw-cell .val.bad { color: var(--danger); }
+.pw-cell .val.low { color: var(--ochre); }
+.pw-cell .hint { font-size: 11px; color: var(--ink-faint); font-weight: 500; }
+.rest-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.rest-chip { font-size: 11.5px; font-weight: 600; color: var(--success); background: var(--success-wash); border-radius: 6px; padding: 3px 7px; }
+.rest-chip.bad { color: var(--danger); background: var(--danger-wash); }
+.rest-chip .hint { color: var(--ink-faint); font-weight: 500; }
+.low-note { font-size: 12px; line-height: 1.45; color: var(--ochre); background: var(--ochre-wash); border-radius: 8px; padding: 7px 9px; }
+
+/* Give/get shift cards live in their own box above the week panels. */
+.review { display: flex; flex-direction: column; gap: 14px; }
+.swap-box {
+  display: grid; gap: 12px;
+  background: var(--paper-inset); border: 1px solid var(--line); border-radius: 14px; padding: 14px;
+}
+.swap-box.legs-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.swap-box.legs-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 860px) { .swap-box.legs-2, .swap-box.legs-3 { grid-template-columns: 1fr; } }
+.leg-shift .leg-kicker { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.leg-shift.is-new { border-left: 3px solid var(--success); }
+.leg-shift.is-old { background: transparent; border-style: dashed; }
+.leg-shift.is-old .what,
+.leg-shift.is-old .when,
+.leg-shift.is-old .flow,
+.leg-shift.is-old .leg-kicker { color: var(--ink-faint); }
+.leg-shift.is-old .what { text-decoration: line-through; text-decoration-thickness: 1px; font-weight: 560; }
+.leg-shift.is-old .stamp { opacity: 0.55; }
+.old-tag { font-size: 9.5px; letter-spacing: 0.1em; color: var(--ink-faint); border: 1px solid var(--line-strong); border-radius: 4px; padding: 1px 5px; }
+
+/* Person card for whoever gives the shift away: muted so the taker's card reads as current. */
+.pw-row.is-old { background: transparent; border-style: dashed; }
+.pw-row.is-old .pw-name,
+.pw-row.is-old .pw-role,
+.pw-row.is-old .pw-cell .val,
+.pw-row.is-old .pw-cell .val.low,
+.pw-row.is-old .pw-cell .val.bad { color: var(--ink-faint); }
+.pw-row.is-old .you-chip { color: var(--ink-faint); border-color: var(--line-strong); }
+.pw-row.is-old .low-note { color: var(--ink-faint); background: var(--paper-inset); }

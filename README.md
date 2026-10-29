@@ -17,7 +17,32 @@ Both wrap the same core module: `netlify/functions/lib/shifts-core.mjs`.
   rest rule holds (gap ≥ prior shift's duration on both sides), and neither
   person exceeds 60h in the Mon–Sun week of their new shift.
 - ED/Tra stamp: the partner works an ED (JMH/HCH) or Trauma shift during the
-  Mon–Sun week of the shift you're giving away.
+  Mon–Sun week of the shift you're giving away. Peds stamp: same, for Peds ER.
+- Weekly hours include shifts already worked earlier that week. All-day calendar
+  entries are not counted as hours.
+
+## Peds ER shifts (Amion)
+
+The server also imports Peds ER shifts from the UM peds Amion schedule
+(`netlify/functions/lib/amion-peds.mjs`):
+
+- It opens `amion.com/cgi-bin/ocs?Lo=umipe`, takes the fresh `File=!...` token from
+  that page's Shift link, then follows each page's "Next rotation" link until it
+  covers 3 months ahead (plus the previous rotation for the 21-day lookback).
+- Only ER rows with a time in the label are read ("ER* 9p-7a", "ER* 3PM - 11PM").
+  Overnight shifts end the next morning, and times are converted as Eastern wall
+  clock, so DST nights come out the right length.
+- Only names with an `ED 1/2` or `ER 3` style prefix are imported, and only when the
+  last name matches an app user. Last names come from QGenda titles ("[Setty EM28]").
+  To override, add `"lastName": "..."` to that person's entry in `calendars.data.mjs`.
+- Peds shifts are tradable, count toward the rest rule and 60h cap, and get a Peds badge.
+- Amion is re-fetched at most every 10 minutes per warm server instance.
+- Settings: `AMION_PEDS_LOGIN` env var overrides the login code; set it to `off` to
+  disable the import. If Amion can't be reached or its layout changes, the app still
+  loads QGenda shifts and shows "1 feed unreachable" (hover for the reason).
+
+Check the live import any time with `npm run check:amion` (or `npm run check:amion -- Setty`).
+Run the tests with `npm test`.
 
 ## Local development
 

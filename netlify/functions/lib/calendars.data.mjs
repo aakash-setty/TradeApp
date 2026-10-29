@@ -90,5 +90,15 @@ export default [
   {
     "name": "Dilraj",
     "url": "https://app.qgenda.com/ical?key=df499d38-0725-4174-876d-ca1e4a550556"
+  },
+  {
+    "name": "Alex",
+    "lastName": "Pedowitz",
+    "url": "https://app.qgenda.com/ical?key=a66f074f-2b46-4fe9-855d-c161b8fcfe54"
+  },
+  {
+    "name": "Gisselle",
+    "lastName": "Pegaitaz",
+    "url": "https://app.qgenda.com/ical?key=9dd50b8a-bca0-4b22-99fb-f955493f2cb3"
   }
 ];

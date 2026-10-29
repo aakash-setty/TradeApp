@@ -13,6 +13,10 @@ import {
   threeWayOptions,
   simulateSwapOk,
   personWorksEdTraInWeek,
+  personWorksPedsInWeek,
+  isPedsTitle,
+  weekHours,
+  inferBlock,
   isWeekendStart,
   weekStart,
   weekEnd,
@@ -102,7 +106,14 @@ async function load() {
     const at = fmtTime(new Date(payload.fetchedAt || Date.now()));
     const failed = DATA.errors.length ? ` · ${DATA.errors.length} feed${DATA.errors.length > 1 ? "s" : ""} unreachable` : "";
     $("#freshness").textContent = `Updated ${at}${failed}`;
-    $("#freshness").title = DATA.errors.map((e) => `${e.person}: ${e.error}`).join("\n");
+    const tip = DATA.errors.map((e) => `${e.person}: ${e.error}`);
+    const p = DATA.peds;
+    if (p && p.ok) {
+      tip.push(`Peds ER (Amion): ${p.count} shifts, ${p.coveredFrom} to ${p.coveredTo}`);
+      if (p.peopleWithoutLastName && p.peopleWithoutLastName.length) tip.push(`No last name found for: ${p.peopleWithoutLastName.join(", ")}`);
+      if (p.conflicts && p.conflicts.length) tip.push(...p.conflicts);
+    }
+    $("#freshness").title = tip.join("\n");
   } catch (e) {
     const msg = esc(e && e.message ? e.message : String(e));
     $("#mine").innerHTML = `<div class="error-note">Couldn&rsquo;t load the schedules (${msg}).<button id="retryBtn">Try again</button></div>`;
@@ -271,6 +282,8 @@ function buildTradesList(mineShift, include3) {
       const person = e.type === "3way" ? e.from : s.person;
       const edtra = personWorksEdTraInWeek(DATA.all, person, mineShift.start)
         ? `<span class="stamp stamp-amber">ED/Tra</span>` : "";
+      const pedsStamp = personWorksPedsInWeek(DATA.all, person, mineShift.start)
+        ? `<span class="stamp stamp-peds">Peds</span>` : "";
       const typeStamp = e.type === "3way" ? `<span class="stamp stamp-3way">3-way</span>` : "";
       const chain =
         e.type === "3way"
@@ -281,7 +294,7 @@ function buildTradesList(mineShift, include3) {
         <div class="card-body">
           <div class="card-title"><span class="with">with ${esc(person)}</span> &middot; ${esc(s.title)}</div>
           ${chain}
-          ${stampRow([weekendStamp(s), edtra, typeStamp].filter(Boolean))}
+          ${stampRow([weekendStamp(s), edtra, pedsStamp, typeStamp].filter(Boolean))}
         </div>
         <button class="review-btn" data-id="${esc(s.id)}">Review</button>
       </div>`;
@@ -292,117 +305,113 @@ function buildTradesList(mineShift, include3) {
 }
 
 // ---------------- The sheet (trade memo) ----------------
+// One column per shift that changes hands. Under each shift: the Mon-Sun week it falls
+// in, and for both people involved (giver and receiver) their inferred block and total
+// hours that week after the whole trade.
 
-function folioHTML(o) {
-  const ws = weekStart(o.gets.start);
-  const we = weekEnd(o.gets.start);
-  const span = we - ws;
-  const pct = (t) => Math.max(0, Math.min(100, ((t - ws) / span) * 100));
-
-  const seg = (s, cls) => {
-    const l = pct(s.start), r = pct(s.end);
-    if (r <= l) return "";
-    const tip = esc(`${s.title} · ${fmtDayFull(s.start)} ${fmtTime(s.start)}–${fmtTime(s.end)}`);
-    return `<div class="tl-seg ${cls}" style="left:${l.toFixed(2)}%;width:${Math.max(r - l, 1.4).toFixed(2)}%" title="${tip}"></div>`;
-  };
-
-  let segs = "";
-  for (const s of o.schedule) if (s.id !== o.gets.id) segs += seg(s, "other");
-  const removedInWeek = o.removed.end > ws && o.removed.start < we;
-  if (removedInWeek) segs += seg(o.removed, "removed");
-  segs += seg(o.gets, "new");
-
-  let days = "", grid = "";
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(ws);
-    d.setDate(ws.getDate() + i);
-    days += `<div><span class="dw">${dow(d)}</span><span class="dt">${d.getDate()}</span></div>`;
-    grid += `<div class="${i >= 5 ? "we" : ""}"></div>`;
-  }
-
-  const prevOK = o.pos.prev ? o.prevGap >= durationHours(o.pos.prev) : true;
-  const nextOK = o.pos.next ? o.nextGap >= durationHours(o.gets) : true;
-  const capOk = o.weekTotal <= 60.0;
-  const fOK = capOk && prevOK && nextOK;
-
-  const loadPct = Math.min(100, (o.weekTotal / 60) * 100);
-  const loadCls = !capOk ? "bad" : o.weekTotal > 54 ? "warn" : "ok";
-
-  const line = (cls, sign, verb, s) =>
-    `<div class="swap-line ${cls}">
-      <span class="sign">${sign}</span><span class="verb">${verb}</span>
-      <span class="what">${esc(s.title)}</span>
-      <span class="when">${fmtDayFull(s.start)} &middot; ${fmtTime(s.start)}&ndash;${fmtTime(s.end)} &middot; ${fmtDur(s)}</span>
-    </div>`;
-
-  const restCell = (label, neighbor, gap, needed, ok) => {
-    if (!neighbor) return `<div class="rest-cell"><div class="lab">${label}</div><div class="val">&mdash; <span class="hint">no adjacent shift</span></div></div>`;
-    return `<div class="rest-cell ${ok ? "" : "bad"}"><div class="lab">${label}</div>
-      <div class="val">${gap.toFixed(1)}h <span class="${ok ? "okmark" : "badmark"}">${ok ? "✓" : "✗"}</span>
-      <span class="hint">needs &ge; ${needed.toFixed(1)}h</span></div></div>`;
-  };
-
-  const weekLabel = `${fmtMonDay(ws)} &ndash; ${fmtMonDay(new Date(we - 1))}`;
-
-  return `<div class="folio">
-    <div class="folio-head">
-      <div class="folio-name">${esc(o.name)}${o.isMe ? '<span class="you-chip">you</span>' : ""}</div>
-      <div class="verdict ${fOK ? "good" : "warn"}">${fOK ? "All rules pass" : "Review"}</div>
-    </div>
-    ${line("gives", "&minus;", "Gives", o.gives)}
-    ${line("gets", "+", "Gets", o.gets)}
-    <div class="tl-block">
-      <div class="tl-cap">Week of ${weekLabel} <span class="soft">(after swap)</span></div>
-      <div class="tl-days">${days}</div>
-      <div class="tl-strip"><div class="tl-grid">${grid}</div>${segs}</div>
-      <div class="tl-key">
-        <span><span class="k new"></span>New shift</span>
-        <span><span class="k other"></span>Existing</span>
-        ${removedInWeek ? '<span><span class="k removed"></span>Given away</span>' : ""}
-      </div>
-    </div>
-    <div class="ledger">
-      <div class="ledger-head"><span>Weekly hours after swap</span>
-        <strong class="${capOk ? "" : "over"}"><span class="count" data-count="${o.weekTotal.toFixed(1)}">0.0</span>h <span class="of">/ 60h</span></strong>
-      </div>
-      <div class="ledger-bar"><div class="ledger-fill ${loadCls}" data-width="${loadPct.toFixed(1)}"></div></div>
-    </div>
-    <div class="rest-row">
-      ${restCell("Rest before", o.pos.prev, o.prevGap, o.pos.prev ? durationHours(o.pos.prev) : null, prevOK)}
-      ${restCell("Rest after", o.pos.next, o.nextGap, durationHours(o.gets), nextOK)}
-    </div>
-  </div>`;
-}
-
-function findPrevNext(sorted, id) {
-  const idx = sorted.findIndex((s) => s.id === id);
-  return {
-    prev: idx > 0 ? sorted[idx - 1] : null,
-    next: idx >= 0 && idx + 1 < sorted.length ? sorted[idx + 1] : null,
-  };
-}
+const LOW_HOURS = 20;
 
 const cloneFor = (person, s) => ({ ...s, person, id: `${person}|${s.start.getTime()}|${s.end.getTime()}|${s.title}` });
 
-function sumWeek(sched, anchor) {
-  const ws = weekStart(anchor), we = weekEnd(anchor);
-  let t = 0;
-  for (const s of sched) if (s.start >= ws && s.start < we) t += durationHours(s);
-  return t;
+// legs: [{shift, from, to}] — every shift that moves in this trade.
+function postSchedule(person, legs) {
+  const giving = new Set(legs.filter((l) => l.from === person).map((l) => l.shift.id));
+  const receiving = legs.filter((l) => l.to === person).map((l) => cloneFor(person, l.shift));
+  return (DATA.schedules.get(person) || [])
+    .filter((s) => !giving.has(s.id))
+    .concat(receiving)
+    .sort((a, b) => a.start - b.start);
 }
 
-// Build the folioHTML input for one participant who gives up `giveShift`
-// (a real shift on their calendar) and takes on `receiveShift`.
-function buildFolio(name, isMe, giveShift, receiveShift) {
-  const clone = cloneFor(name, receiveShift);
-  const sched = (DATA.schedules.get(name) || []).filter((x) => x.id !== giveShift.id).concat([clone]).sort((a, b) => a.start - b.start);
-  const pos = findPrevNext(sched, clone.id);
-  return {
-    name, isMe, gives: giveShift, gets: clone, removed: giveShift, schedule: sched, pos,
-    prevGap: pos.prev ? gapHours(pos.prev.end, clone.start) : null,
-    nextGap: pos.next ? gapHours(clone.end, pos.next.start) : null,
-    weekTotal: sumWeek(sched, clone.start),
-  };
+function restCheck(sched, shiftId) {
+  const idx = sched.findIndex((s) => s.id === shiftId);
+  const prev = idx > 0 ? sched[idx - 1] : null;
+  const cur = sched[idx];
+  const next = idx >= 0 && idx + 1 < sched.length ? sched[idx + 1] : null;
+  const out = [];
+  if (prev) {
+    const gap = gapHours(prev.end, cur.start), need = durationHours(prev);
+    out.push({ label: "Rest before", gap, need, ok: gap >= need });
+  }
+  if (next) {
+    const gap = gapHours(cur.end, next.start), need = durationHours(cur);
+    out.push({ label: "Rest after", gap, need, ok: gap >= need });
+  }
+  return out;
+}
+
+const fmtH = (h) => (Math.abs(h % 1) > 1e-9 ? h.toFixed(1) : String(Math.round(h))) + "h";
+
+function personRow(person, leg, legs) {
+  const before = DATA.schedules.get(person) || [];
+  const after = postSchedule(person, legs);
+  const anchor = leg.shift.start;
+  const hAfter = weekHours(after, anchor);
+  const hBefore = weekHours(before, anchor);
+  const block = inferBlock(before, anchor);
+  const isMe = person === ME;
+  const role = person === leg.from ? "gives this shift" : "takes this shift";
+  const delta = hAfter === hBefore ? "no change" : `was ${fmtH(hBefore)}`;
+  const capCls = hAfter > 60 ? "bad" : hAfter < LOW_HOURS ? "low" : "";
+
+  let rest = "";
+  if (person === leg.to) {
+    const id = cloneFor(person, leg.shift).id;
+    rest = restCheck(after, id)
+      .map((r) => `<span class="rest-chip ${r.ok ? "" : "bad"}">${r.label} ${fmtH(r.gap)} ${r.ok ? "✓" : "✗"}<span class="hint"> needs ${fmtH(r.need)}</span></span>`)
+      .join("");
+    if (!rest) rest = `<span class="rest-chip">No shifts nearby</span>`;
+  }
+
+  const low = hAfter < LOW_HOURS
+    ? `<div class="low-note">Under ${LOW_HOURS}h this week. ${esc(person)} is either on a non-EM/trauma rotation or on a vacation week (or that week isn&rsquo;t published yet). Check manually.</div>`
+    : "";
+
+  return `<div class="pw-row ${person === leg.from ? "is-old" : ""}">
+    <div class="pw-head">
+      <span class="pw-name">${esc(person)}${isMe ? '<span class="you-chip">you</span>' : ""}</span>
+      <span class="pw-role">${role}</span>
+    </div>
+    <div class="pw-grid">
+      <div class="pw-cell"><div class="lab">Block <span class="soft">(inferred)</span></div><div class="val">${esc(block)}</div></div>
+      <div class="pw-cell"><div class="lab">Hours this week</div><div class="val ${capCls}">${fmtH(hAfter)} <span class="hint">${delta} &middot; cap 60h</span></div></div>
+    </div>
+    ${rest ? `<div class="rest-chips">${rest}</div>` : ""}
+    ${low}
+  </div>`;
+}
+
+// The shift cards on top, in their own box. The shift leaving your schedule is grayed out.
+function shiftCard(leg, heading, old) {
+  const s = leg.shift;
+  const peds = isPedsTitle(s.title) ? `<span class="stamp stamp-peds">Peds ER</span>` : "";
+  return `<div class="leg-shift ${old ? "is-old" : "is-new"}">
+    <div class="leg-kicker">${heading}${old ? '<span class="old-tag">leaves your schedule</span>' : ""}</div>
+    <div class="what">${esc(s.title)} ${peds}</div>
+    <div class="when">${fmtDayFull(s.start)} &middot; ${fmtTime(s.start)}&ndash;${fmtTime(s.end)} &middot; ${fmtDur(s)}</div>
+    <div class="flow">${esc(leg.from)} &rarr; ${esc(leg.to)}</div>
+  </div>`;
+}
+
+// One panel per shift: that shift's Mon-Sun week, for both people involved.
+function legColumn(leg, legs, heading) {
+  const s = leg.shift;
+  const ws = weekStart(s.start), we = weekEnd(s.start);
+  return `<div class="leg">
+    <div class="leg-week">${heading} &middot; week of ${fmtMonDay(ws)} &ndash; ${fmtMonDay(new Date(we - 1))} <span class="soft">(after trade)</span></div>
+    ${personRow(leg.from, leg, legs)}
+    ${personRow(leg.to, leg, legs)}
+  </div>`;
+}
+
+function renderLegs(columns) {
+  const legs = columns.map((c) => c.leg);
+  const n = columns.length;
+  const compare = $("#compare");
+  compare.className = "review";
+  compare.innerHTML =
+    `<div class="swap-box legs-${n}">${columns.map((c) => shiftCard(c.leg, c.heading, c.leg.from === ME)).join("")}</div>` +
+    `<div class="compare legs-${n}">${columns.map((c) => legColumn(c.leg, legs, c.heading)).join("")}</div>`;
 }
 
 function animateSheet() {
@@ -439,11 +448,10 @@ function openSheet(theirShift) {
 
   $("#sheetTitle").innerHTML = `An exchange with <em>${esc(partner)}</em>`;
   $("#loopArea").innerHTML = "";
-  const compare = $("#compare");
-  compare.className = "compare";
-  compare.innerHTML =
-    folioHTML(buildFolio(ME, true, mineShift, theirShift)) +
-    folioHTML(buildFolio(partner, false, theirShift, mineShift));
+  renderLegs([
+    { heading: "You give", leg: { shift: mineShift, from: ME, to: partner } },
+    { heading: "You get", leg: { shift: theirShift, from: partner, to: ME } },
+  ]);
 
   fillSummary();
   setCopied(false);
@@ -473,12 +481,11 @@ function render3Way() {
   $("#sheetTitle").innerHTML = `A 3-way loop with <em>${esc(B)}</em> &amp; <em>${esc(C)}</em>`;
   $("#loopArea").innerHTML = loopDiagram(ME, mineShift, B, sB, C, sC) + (entry.middles.length > 1 ? middleSelector(entry, midIdx) : "");
 
-  const compare = $("#compare");
-  compare.className = "compare compare-3";
-  compare.innerHTML =
-    folioHTML(buildFolio(ME, true, mineShift, sC)) + // you give yours, get C's
-    folioHTML(buildFolio(B, false, sB, mineShift)) + // B gives theirs, gets yours
-    folioHTML(buildFolio(C, false, sC, sB));         // C gives theirs, gets B's
+  renderLegs([
+    { heading: "You give", leg: { shift: mineShift, from: ME, to: B } },
+    { heading: "You get", leg: { shift: sC, from: C, to: ME } },
+    { heading: "Middle leg", leg: { shift: sB, from: B, to: C } },
+  ]);
 
   fillSummary();
   animateSheet();

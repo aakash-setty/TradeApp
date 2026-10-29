@@ -34,8 +34,13 @@ export function isEligibleTitle(title) {
 // Z1/Z2/Z3 = Jackson ED zones; Day/Eve/Night/Ngt 1-3, PODB, B Side,
 // lettered Eve/Ngt A-C = Holy Cross ED; DayTr/NgtTr/TrSenior = Trauma.
 
+export function isPedsTitle(title) {
+  return /^\s*peds\b/i.test(title || "");
+}
+
 export function isEdTraTitle(title) {
   const t = (title || "").toLowerCase();
+  if (isPedsTitle(t)) return false;
   if (/trauma|\bdaytr\b|\bngttr\b|\btrsenior\b/.test(t)) return true;
   if (/^\s*z[123]\b/.test(t)) return true;
   if (/^\s*(day|eve|night|ngt)\s*[123]\b/.test(t)) return true;
@@ -96,35 +101,41 @@ function parseShift(raw) {
     start = new Date(raw.start);
     end = new Date(raw.end);
   }
-  return { person: raw.person, title: raw.title, start, end };
+  return { person: raw.person, title: raw.title, start, end, dateOnly: !!raw.dateOnly, source: raw.source || "qgenda" };
 }
 
 export function buildData(payload) {
+  const cutoff = futureCutoff();
+
   const all = payload.shifts
     .map(parseShift)
     .filter((s) => s.end > s.start)
-    .sort((a, b) => a.start - b.start);
-
-  const cutoff = futureCutoff();
-
-  // Future-only tradable universe (matches the Flask engine exactly:
-  // rule checks only consider shifts starting on/after tomorrow 00:00).
-  const flat = all
-    .filter((s) => s.start >= cutoff)
+    .sort((a, b) => a.start - b.start)
     .map((s) => ({
       ...s,
       id: `${s.person}|${s.start.getTime()}|${s.end.getTime()}|${s.title}`,
-      eligible: isEligibleTitle(s.title),
+      eligible: s.start >= cutoff && isEligibleTitle(s.title),
     }));
 
+  // Tradable universe: future shifts only (starting tomorrow 00:00 or later).
+  const flat = all.filter((s) => s.start >= cutoff);
+
+  // Per-person schedules include the recent past too, so the 60h weekly cap and the
+  // rest rule see shifts already worked earlier in the same week (or the night before).
   const schedules = new Map();
-  for (const s of flat) {
+  for (const s of all) {
     if (!schedules.has(s.person)) schedules.set(s.person, []);
     schedules.get(s.person).push(s);
   }
   for (const arr of schedules.values()) arr.sort((a, b) => a.start - b.start);
 
-  return { all, flat, schedules, people: payload.people, fetchedAt: payload.fetchedAt, errors: payload.errors || [] };
+  return {
+    all, flat, schedules,
+    people: payload.people,
+    fetchedAt: payload.fetchedAt,
+    errors: payload.errors || [],
+    peds: payload.peds || null,
+  };
 }
 
 // ---------------- Rules ----------------
@@ -159,14 +170,20 @@ function localBreakOk(sorted, idx) {
   return true;
 }
 
-function weekCapsOk(primeSched, newShift) {
-  const ws = weekStart(newShift.start);
-  const we = weekEnd(newShift.start);
+// Hours worked in the Mon-Sun week containing `anchor`. All-day calendar entries
+// (dateOnly) are labels such as vacation or a rotation, not hours worked.
+export function weekHours(sched, anchor) {
+  const ws = weekStart(anchor);
+  const we = weekEnd(anchor);
   let total = 0;
-  for (const s of primeSched) {
-    if (s.start >= ws && s.start < we) total += durationHours(s);
+  for (const s of sched) {
+    if (!s.dateOnly && s.start >= ws && s.start < we) total += durationHours(s);
   }
-  return total <= 60.0;
+  return total;
+}
+
+function weekCapsOk(primeSched, newShift) {
+  return weekHours(primeSched, newShift.start) <= 60.0;
 }
 
 // The atomic per-person check every trade is built from: can the owner of
@@ -257,4 +274,42 @@ export function personWorksEdTraInWeek(all, person, anchorDate) {
   return all.some(
     (s) => s.person === person && s.start >= ws && s.start < we && isEdTraTitle(s.title)
   );
+}
+
+// ---------------- Peds badge ----------------
+
+export function personWorksPedsInWeek(all, person, anchorDate) {
+  const ws = weekStart(anchorDate);
+  const we = weekEnd(anchorDate);
+  return all.some((s) => s.person === person && s.start >= ws && s.start < we && isPedsTitle(s.title));
+}
+
+// ---------------- Block inference ----------------
+// There is no block feed, so the block is inferred from what the person works that
+// Mon-Sun week. All-day calendar entries (e.g. "Vacation") are shown by name.
+
+export function shiftCategory(s) {
+  const t = (s.title || "").replace(/\s*\[.*$/, "").trim();
+  const tl = t.toLowerCase();
+  if (s.dateOnly) return t || "All-day entry";
+  if (isPedsTitle(t)) return "Peds ED";
+  if (/trauma|\bdaytr\b|\bngttr\b|\btrsenior\b/.test(tl)) return "Trauma";
+  if (/ultrasound|\bus\b/.test(tl)) return "Ultrasound";
+  if (/sick\s*call/.test(tl)) return "Sick call";
+  if (/^\s*z[123]\b/.test(tl)) return "JMH ED";
+  if (/^\s*(day|eve|night|ngt)\s*[123]\b|^\s*podb\s*[12]\b|\bb side\b|^\s*(eve|ngt)\s+[abc][12]\b/.test(tl)) return "HCH ED";
+  return t || "Other";
+}
+
+export function inferBlock(sched, anchorDate) {
+  const ws = weekStart(anchorDate);
+  const we = weekEnd(anchorDate);
+  const hours = new Map();
+  for (const s of sched) {
+    if (s.end <= ws || s.start >= we) continue;
+    const c = shiftCategory(s);
+    hours.set(c, (hours.get(c) || 0) + (s.dateOnly ? 0 : durationHours(s)));
+  }
+  if (!hours.size) return "No shifts on calendar";
+  return [...hours.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c).join(" + ");
 }
