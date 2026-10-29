@@ -100,5 +100,10 @@ export default [
     "name": "Gisselle",
     "lastName": "Pegaitaz",
     "url": "https://app.qgenda.com/ical?key=9dd50b8a-bca0-4b22-99fb-f955493f2cb3"
+  },
+  {
+    "name": "Melissa Rallo",
+    "lastName": "Rallo",
+    "url": "https://app.qgenda.com/ical?key=be663600-9c68-4f0b-9a22-beea7e6fc59a"
   }
 ];
