@@ -27,6 +27,7 @@ import {
   durationHours,
   gapHours,
 } from "./rules.js";
+import { awayInWeek, blockDataCovers, BLOCK_TYPES } from "./blocks.js";
 
 const $ = (s) => document.querySelector(s);
 const ICONS = { RefreshCw, Moon, Sun, X, Feather };
@@ -230,12 +231,45 @@ function emptyMsg(text) {
   return `<div class="empty"><span class="fleuron">&#10086;</span>${text}</div>`;
 }
 
+// ---------------- Away that week (block schedule) ----------------
+
+const AWAY_CLASS = { Vacation: "away-vac", Elective: "away-elec", Ultrasound: "away-us" };
+
+function renderAway(mineShift) {
+  const box = $("#away");
+  if (!box) return;
+  if (!mineShift) {
+    box.innerHTML = `<p class="away-empty">Choose one of your shifts to see who&rsquo;s away that week.</p>`;
+    return;
+  }
+  const ws = weekStart(mineShift.start), we = weekEnd(mineShift.start);
+  let html = `<div class="away-week">Week of ${fmtMonDay(ws)} &ndash; ${fmtMonDay(new Date(we - 1))}</div>`;
+  if (!blockDataCovers(ws)) {
+    box.innerHTML = html + `<p class="away-empty">No block schedule loaded for this week.</p>`;
+    return;
+  }
+  const groups = awayInWeek(ws, we);
+  for (const t of BLOCK_TYPES) {
+    const people = groups[t];
+    const names = people.length
+      ? people.map((p) => `<li>${esc(p.name)}<span class="pgy">PGY-${p.pgy}</span></li>`).join("")
+      : `<li class="none">No one</li>`;
+    html += `<div class="away-group">
+      <div class="away-head"><span class="away-tag ${AWAY_CLASS[t]}">${t}</span><span class="away-count">${people.length}</span></div>
+      <ul class="away-names">${names}</ul>
+    </div>`;
+  }
+  html += `<p class="away-note">From the PGY-II and PGY-III block schedules. PGY-I not included.</p>`;
+  box.innerHTML = html;
+}
+
 function renderTrades() {
   const box = $("#trades");
   OPTION_INDEX = new Map();
   clearTimeout(_threeTimer);
 
   const mineShift = DATA && DATA.flat.find((s) => s.id === SELECTED);
+  renderAway(mineShift);
   if (!mineShift) {
     box.innerHTML = emptyMsg("Choose one of your shifts to see who can take it.");
     return;
