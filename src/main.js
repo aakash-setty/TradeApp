@@ -19,6 +19,8 @@ import {
   inferBlock,
   consecutiveDaysRun,
   MAX_CONSECUTIVE_DAYS,
+  setWednesdayRule,
+  wednesdayRuleOn,
   isWeekendStart,
   weekStart,
   weekEnd,
@@ -152,9 +154,12 @@ function groupByWeek(shifts) {
 function dateTile(s) {
   const wkndTile = s.start.getDay() === 0 || s.start.getDay() === 6;
   return `<div class="date-tile ${wkndTile ? "wkend" : ""}">
-    <span class="dow">${dow(s.start)}</span>
-    <span class="dom">${s.start.getDate()}</span>
-    <span class="tt">${compactRange(s)}</span>
+    <span class="mon">${mon(s.start)}</span>
+    <span class="dt-body">
+      <span class="dow">${dow(s.start)}</span>
+      <span class="dom">${s.start.getDate()}</span>
+      <span class="tt">${compactRange(s)}</span>
+    </span>
   </div>`;
 }
 
@@ -441,7 +446,22 @@ function showBackdrop() {
   refreshIcons();
 }
 
+let REOPEN = null; // re-renders the open sheet when a rule switch changes
+
+function applyWedRule(on, persist = true) {
+  setWednesdayRule(on);
+  const btn = $("#wedToggle");
+  if (btn) {
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.classList.toggle("on", on);
+    $("#wedLabel").textContent = on ? "Wednesday rule on" : "Wednesday rule off";
+  }
+  document.querySelectorAll(".wed-note").forEach((el) => (el.hidden = !on));
+  if (persist) { try { localStorage.setItem("wed-rule", on ? "on" : "off"); } catch (e) {} }
+}
+
 function openSheet(theirShift) {
+  REOPEN = () => openSheet(theirShift);
   const mineShift = DATA.flat.find((s) => s.id === SELECTED);
   if (!mineShift) return;
 
@@ -468,6 +488,7 @@ function openSheet(theirShift) {
 
 function open3Way(entry) {
   SHEET3 = { entry, midIdx: 0 };
+  REOPEN = () => { if (SHEET3) render3Way(); };
   setCopied(false);
   render3Way();
   showBackdrop();
@@ -522,6 +543,7 @@ function middleSelector(entry, midIdx) {
 }
 
 function closeSheet() {
+  REOPEN = null;
   $("#backdrop").hidden = true;
   document.body.style.overflow = "";
 }
@@ -639,6 +661,15 @@ function init() {
     btn.classList.toggle("on", INCLUDE_3WAY);
     $("#threeWayLabel").textContent = INCLUDE_3WAY ? "Showing 2 + 3-way" : "Show 3-way trades";
     renderTrades();
+  });
+
+  let wedSaved = null;
+  try { wedSaved = localStorage.getItem("wed-rule"); } catch (e) {}
+  applyWedRule(wedSaved !== "off", false);
+  $("#wedToggle").addEventListener("click", () => {
+    applyWedRule(!wednesdayRuleOn());
+    if (DATA) renderTrades();
+    if (REOPEN && !$("#backdrop").hidden) REOPEN();
   });
 
   $("#loopArea").addEventListener("click", (e) => {

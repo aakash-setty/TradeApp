@@ -139,3 +139,16 @@ test("a swap is rejected when an unworked Wednesday makes the 7th day", () => {
     assert.equal(simulateSwapOk(D.schedules, give, sun)[0], false);
   });
 });
+
+test("Wednesday rule can be switched off", async () => {
+  const { consecutiveDaysRun, setWednesdayRule } = await import("../src/rules.js");
+  const at = (ymd) => ({ start: new Date(`${ymd}T07:00:00-05:00`), end: new Date(`${ymd}T15:00:00-05:00`), dateOnly: false });
+  const sched = ["2026-11-16", "2026-11-17", "2026-11-19", "2026-11-20", "2026-11-21", "2026-11-22"].map(at);
+  const anchor = new Date("2026-11-22T07:00:00-05:00");
+  try {
+    setWednesdayRule(false);
+    assert.equal(consecutiveDaysRun(sched, anchor), 4); // Thu-Sun only
+    setWednesdayRule(true);
+    assert.equal(consecutiveDaysRun(sched, anchor), 7);
+  } finally { setWednesdayRule(true); }
+});

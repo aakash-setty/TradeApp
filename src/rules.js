@@ -197,9 +197,14 @@ export const WEDNESDAY_EXCEPTIONS = ["2026-11-25", "2026-12-23"];
 const WED_EXCEPTION_KEYS = new Set(WEDNESDAY_EXCEPTIONS.map((d) => Number(d.replace(/-/g, ""))));
 
 const dayKey = (d) => d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+// The Wednesday rule can be switched off from the page (on by default).
+let WEDNESDAY_RULE = true;
+export function setWednesdayRule(on) { WEDNESDAY_RULE = !!on; }
+export function wednesdayRuleOn() { return WEDNESDAY_RULE; }
+
 // True for a Wednesday that counts as worked even without a shift.
 export function isMandatoryWednesday(d) {
-  return d.getDay() === 3 && !WED_EXCEPTION_KEYS.has(dayKey(d));
+  return WEDNESDAY_RULE && d.getDay() === 3 && !WED_EXCEPTION_KEYS.has(dayKey(d));
 }
 
 // Length of the run of consecutive worked days that includes the day `anchor` starts on.

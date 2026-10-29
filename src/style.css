@@ -738,3 +738,31 @@ html[data-theme="dark"] .stamp-peds { color: #8cc6dc; background: #13262e; }
   padding-bottom: 8px; border-bottom: 1px solid var(--line-strong);
 }
 .leg .leg-week .after { font-family: var(--sans); font-size: 14px; font-weight: 800; letter-spacing: 0.12em; color: var(--accent); margin-right: 2px; }
+
+/* Date tile: month runs sideways up the left edge (read by tilting your head left). */
+.date-tile { display: flex; align-items: stretch; padding: 0; overflow: hidden; width: 70px; }
+.date-tile .mon {
+  flex: none; display: flex; align-items: center; justify-content: center;
+  writing-mode: vertical-rl; transform: rotate(180deg);
+  width: 15px; padding: 0;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.22em; text-transform: uppercase;
+  color: var(--ink-soft); background: var(--paper-inset);
+  border-left: 1px solid var(--line); /* sits on the right after rotating */
+}
+.date-tile .dt-body { flex: 1; min-width: 0; padding: 6px 2px 7px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.card.selected .date-tile .mon { color: var(--paper-raised); background: var(--accent); border-left-color: var(--accent); }
+html[data-theme="dark"] .card.selected .date-tile .mon { color: var(--paper); }
+@media (max-width: 560px) {
+  .date-tile { width: 62px; padding: 0; }
+  .date-tile .mon { width: 13px; font-size: 8px; letter-spacing: 0.16em; }
+  .date-tile .dt-body { padding: 5px 1px 6px; }
+}
+
+/* Wednesday-rule switch: tucked into the footer, nearly invisible (admin use) */
+.wed-toggle {
+  display: block; margin: 18px auto 0; padding: 4px 8px;
+  background: none; border: 0; cursor: pointer;
+  font: inherit; font-size: 10px; letter-spacing: 0.08em;
+  color: var(--ink-faint); opacity: 0.22;
+}
+.wed-toggle:hover, .wed-toggle:focus-visible { opacity: 0.7; }
