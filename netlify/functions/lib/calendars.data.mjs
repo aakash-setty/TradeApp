@@ -105,5 +105,13 @@ export default [
     "name": "Melissa Rallo",
     "lastName": "Rallo",
     "url": "https://app.qgenda.com/ical?key=be663600-9c68-4f0b-9a22-beea7e6fc59a"
+  },
+  {
+    "name": "Jenna",
+    "url": "https://app.qgenda.com/ical?key=c4ba6b72-4177-4ecc-904d-f8d8bb703c7a"
+  },
+  {
+    "name": "Monica",
+    "url": "https://app.qgenda.com/ical?key=ecbe1eb9-6bbf-47a3-b6f4-201e84b4a6b4"
   }
 ];
