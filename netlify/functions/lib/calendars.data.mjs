@@ -113,5 +113,9 @@ export default [
   {
     "name": "Monica",
     "url": "https://app.qgenda.com/ical?key=ecbe1eb9-6bbf-47a3-b6f4-201e84b4a6b4"
+  },
+  {
+    "name": "Nicole",
+    "url": "https://app.qgenda.com/ical?key=25abd7d0-214d-488e-abad-25a2fd2d6d21"
   }
 ];
